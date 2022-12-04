@@ -1,6 +1,6 @@
 from pathlib import PurePath, Path
 from zipfile import ZipFile, is_zipfile, BadZipFile
-from zlib import decompressobj, MAX_WBITS
+from zlib import decompressobj, MAX_WBITS, error as ZLIB_error
 from aiofile import async_open
 
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
@@ -25,20 +25,21 @@ async def unzip(zip_file, path=None, files=[], regex_files=None, buffer_size=Non
                 src.seek(in_file.header_offset)
                 if __debug:
                     print(f'Done HEADER_OFFSET seek: {in_file.header_offset}')
-                await src.read(30)
+                temp = await src.read(30)
                 if __debug:
-                    print(f'Done FILEPATH seek: {30}')
-                await src.read(len(in_file.filename))
+                    print(f'Done FILEPATH seek: {30} - {temp}')
+                temp = await src.read(len(in_file.filename))
                 if __debug:
-                    print(f'Done FILENAME seek: {len(in_file.filename)}')
-                if len(in_file.extra) > 0:
-                    t = await src.read(len(in_file.extra))
-                    if __debug:
-                        print(f'Done EXTRA seek: {len(in_file.extra)} {t}')
-                if len(in_file.comment) > 0:
-                    await src.read(len(in_file.comment))
-                    if __debug:
-                        print(f'Done COMMENT seek: {len(in_file.comment)}')
+                    print(f'Done FILENAME seek: {len(in_file.filename)} - {temp}')
+                if in_file.file_size < 4294967296:
+                    if len(in_file.extra) > 0:
+                        t = await src.read(len(in_file.extra))
+                        if __debug:
+                            print(f'Done EXTRA seek: {len(in_file.extra)} {t}')
+                    if len(in_file.comment) > 0:
+                        await src.read(len(in_file.comment))
+                        if __debug:
+                            print(f'Done COMMENT seek: {len(in_file.comment)}')
 
                 if in_file.is_dir():
                     unpack_filename_path.mkdir(parents=True, exist_ok=True)
@@ -46,14 +47,25 @@ async def unzip(zip_file, path=None, files=[], regex_files=None, buffer_size=Non
                 else:
                     unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
 
-
                 async with async_open(str(unpack_filename_path), 'wb+') as out:
                     i = in_file.compress_size
-                    decomp = decompressobj(-MAX_WBITS)
-
                     buf = await src.read(read_block)
+
+                    decomp_window_bits = None
+                    for window_bits in (-MAX_WBITS, MAX_WBITS | 16, MAX_WBITS):
+                        try:
+                            decomp_window_bits = window_bits
+                            if __debug:
+                                print(f"Try WindowBits: {window_bits}")
+                            decompressobj(window_bits).decompress(buf)
+                            break
+                        except ZLIB_error:
+                            if __debug:
+                                print(f"Failed WindowBits: {window_bits}")
+
+                    decomp = decompressobj(decomp_window_bits)
                     if __debug:
-                        print(f'Length: {len(buf)}')
+                        print(f'Incoming Length: {len(buf)}')
                     while buf:
                         result = decomp.decompress(buf)
                         await out.write(result)

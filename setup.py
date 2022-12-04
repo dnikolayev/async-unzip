@@ -34,7 +34,7 @@ setup(
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     author="Dmytro Nikolayev",
-    author_email="dmytro@ueni.com",
+    author_email="dnikolayev@gmail.com",
     url="https://github.com/ueni-ltd/async-unzip",
     packages=["async_unzip"],
     install_requires=REQUIRES,

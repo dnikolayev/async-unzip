@@ -4,9 +4,6 @@ from setuptools import setup
 
 REQUIRES = [
     'aiofile',
-    'zlib',
-    'zipfile',
-    'pathlib'
 ]
 
 def find_version(fname):
@@ -52,6 +49,7 @@ setup(
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
     ],
     requirements = REQUIRES,

@@ -3,7 +3,6 @@ import re
 from setuptools import setup
 
 REQUIRES = [
-    'aiofile',
 ]
 
 def find_version(fname):
@@ -23,6 +22,28 @@ def find_version(fname):
     return version
 
 __version__ = find_version("async_unzip/__init__.py")
+
+missed_modules = 0
+
+try:
+    from aiofile import async_open
+except ModuleNotFoundError as err:
+    missed_modules += 1
+
+try:
+    from aiofiles import open as async_open
+except ModuleNotFoundError as err:
+    missed_modules += 1
+except ImportError as err:
+    missed_modules += 1
+
+if missed_modules == 2:
+    print("""Not aiofile nor aiofiles is present! Going to crash..
+        please do:
+            pip install aiofile
+        or
+            pip install aiofiles
+        to make the code working, Thanks!""")
 
 setup(
     name="async-unzip",

@@ -1,7 +1,30 @@
 from pathlib import PurePath, Path
 from zipfile import ZipFile, is_zipfile, BadZipFile
 from zlib import decompressobj, MAX_WBITS, error as ZLIB_error
-from aiofile import async_open
+
+missed_modules = 0
+async_reader = 'aiofile'
+try:
+    from aiofile import async_open
+except ModuleNotFoundError as err:
+    missed_modules += 1
+
+try:
+    from aiofiles import open as async_open
+    async_reader = 'aiofiles'
+except ModuleNotFoundError as err:
+    missed_modules += 1
+except ImportError as err:
+    missed_modules += 1
+
+if missed_modules == 2:
+    print("""Not aiofile nor aiofiles is present! Going to crash..
+        please do:
+            pip install aiofile
+        or
+            pip install aiofiles
+        to make the code working, Thanks!""")
+
 
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
 
@@ -15,14 +38,17 @@ async def unzip(zip_file, path=None, files=[], regex_files=None, buffer_size=Non
             extra_path = ''
         else:
             extra_path = PurePath(path)
-        async with async_open(zip_file, 'rb') as src:
+        async with async_open(zip_file, mode='rb') as src:
             for in_file in files_info:
                 file_name = in_file.filename
                 unpack_filename_path = Path(str(PurePath(extra_path, file_name)))
                 if __debug:
                     print(in_file)
                     print(unpack_filename_path)
-                src.seek(in_file.header_offset)
+                if async_reader == 'aiofile':
+                    src.seek(in_file.header_offset)
+                else:
+                    await src.seek(in_file.header_offset)
                 if __debug:
                     print(f'Done HEADER_OFFSET seek: {in_file.header_offset}')
                 temp = await src.read(30)

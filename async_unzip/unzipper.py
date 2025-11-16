@@ -1,109 +1,230 @@
+"""Async ZIP extraction helpers with minimal memory usage."""
+
+import re
 from pathlib import PurePath, Path
-from zipfile import ZipFile, is_zipfile, BadZipFile
+from typing import Iterable, Optional
+from zipfile import ZipFile, is_zipfile, BadZipFile, ZIP_STORED
 from zlib import decompressobj, MAX_WBITS, error as ZLIB_error
 
-missed_modules = 0
-async_reader = 'aiofile'
-try:
-    from aiofile import async_open
-except ModuleNotFoundError as err:
-    missed_modules += 1
-
-try:
-    from aiofiles import open as async_open
-    async_reader = 'aiofiles'
-except ModuleNotFoundError as err:
-    missed_modules += 1
-except ImportError as err:
-    missed_modules += 1
-
-if missed_modules == 2:
-    print("""Not aiofile nor aiofiles is present! Going to crash..
-        please do:
-            pip install aiofile
-        or
-            pip install aiofiles
-        to make the code working, Thanks!""")
-
-
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
+LOCAL_FILE_HEADER_SIZE = 30
+LOCAL_FILE_HEADER_SIGNATURE = b"PK\x03\x04"
+
+try:
+    from aiofile import async_open as _AIOFILE_OPEN
+except ModuleNotFoundError:  # pragma: no cover - platform specific
+    _AIOFILE_OPEN = None
+
+try:
+    from aiofiles import open as _AIOFILES_OPEN
+except (ModuleNotFoundError, ImportError):  # pragma: no cover
+    _AIOFILES_OPEN = None
+
+MISSED_MODULES = int(_AIOFILE_OPEN is None) + int(_AIOFILES_OPEN is None)
+
+if _AIOFILES_OPEN:
+    ASYNC_READER = "aiofiles"
+    ASYNC_OPEN = _AIOFILES_OPEN
+elif _AIOFILE_OPEN:
+    ASYNC_READER = "aiofile"
+    ASYNC_OPEN = _AIOFILE_OPEN
+else:
+    ASYNC_READER = "aiofile"
+    ASYNC_OPEN = None
+    print(  # pragma: no cover - mirrors legacy behaviour
+        "Not aiofile nor aiofiles is present! Going to crash..\n"
+        "    please do:\n"
+        "        pip install aiofile\n"
+        "    or\n"
+        "        pip install aiofiles\n"
+        "    to make the code working, Thanks!"
+    )
+
+# Backwards compatibility for external imports.
+async_open = ASYNC_OPEN
+async_reader = ASYNC_READER  # pylint: disable=invalid-name
+missed_modules = MISSED_MODULES
 
 
-async def unzip(zip_file, path=None, files=[], regex_files=None, buffer_size=None, __debug=None):
-    read_block = buffer_size if (buffer_size and int(buffer_size)>0) else DEFAULT_READ_BUFFER_SIZE
-
-    if is_zipfile(zip_file):
-        files_info = ZipFile(zip_file).infolist()
-        if path == None:
-            extra_path = ''
-        else:
-            extra_path = PurePath(path)
-        async with async_open(zip_file, mode='rb') as src:
-            for in_file in files_info:
-                file_name = in_file.filename
-                unpack_filename_path = Path(str(PurePath(extra_path, file_name)))
-                if __debug:
-                    print(in_file)
-                    print(unpack_filename_path)
-                if async_reader == 'aiofile':
-                    src.seek(in_file.header_offset)
-                else:
-                    await src.seek(in_file.header_offset)
-                if __debug:
-                    print(f'Done HEADER_OFFSET seek: {in_file.header_offset}')
-                temp = await src.read(30)
-                if __debug:
-                    print(f'Done FILEPATH seek: {30} - {temp}')
-                temp = await src.read(len(in_file.filename))
-                if __debug:
-                    print(f'Done FILENAME seek: {len(in_file.filename)} - {temp}')
-                if in_file.file_size < 4294967296:
-                    if len(in_file.extra) > 0:
-                        t = await src.read(len(in_file.extra))
-                        if __debug:
-                            print(f'Done EXTRA seek: {len(in_file.extra)} {t}')
-                    if len(in_file.comment) > 0:
-                        await src.read(len(in_file.comment))
-                        if __debug:
-                            print(f'Done COMMENT seek: {len(in_file.comment)}')
-
-                if in_file.is_dir():
-                    unpack_filename_path.mkdir(parents=True, exist_ok=True)
-                    continue
-                else:
-                    unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
-
-                async with async_open(str(unpack_filename_path), 'wb+') as out:
-                    i = in_file.compress_size
-                    buf = await src.read(read_block)
-
-                    decomp_window_bits = None
-                    for window_bits in (-MAX_WBITS, MAX_WBITS | 16, MAX_WBITS):
-                        try:
-                            decomp_window_bits = window_bits
-                            if __debug:
-                                print(f"Try WindowBits: {window_bits}")
-                            decompressobj(window_bits).decompress(buf)
-                            break
-                        except ZLIB_error:
-                            if __debug:
-                                print(f"Failed WindowBits: {window_bits}")
-
-                    decomp = decompressobj(decomp_window_bits)
-                    if __debug:
-                        print(f'Incoming Length: {len(buf)}')
-                    while buf:
-                        result = decomp.decompress(buf)
-                        await out.write(result)
-                        curr_read_block = read_block if i > read_block else i
-                        buf = await src.read(curr_read_block)
-                        i -= curr_read_block
-                        if __debug:
-                            print(f'Length: {len(buf)}')
-
-                    result = decomp.flush()
-                    if __debug:
-                        print(f'Flush Length: {len(buf)}')
-                    await out.write(result)
+def _compile_patterns(regex_files: Optional[Iterable[str]]):
+    """Compile optional regex filters."""
+    if not regex_files:
+        return None
+    if isinstance(regex_files, (list, tuple)):
+        regex_list = list(regex_files)
     else:
+        regex_list = [regex_files]
+    return [re.compile(pattern) for pattern in regex_list]
+
+
+def _should_extract(file_name, whitelist, regex_patterns):
+    """Return True when the entry should be extracted."""
+    matches_whitelist = not whitelist or file_name in whitelist
+    matches_regex = not regex_patterns or any(
+        pattern.search(file_name) for pattern in regex_patterns
+    )
+    return matches_whitelist and matches_regex
+
+
+async def _read_local_header(src, file_name, __debug=None):
+    """Read the local header and skip filename/extra blocks."""
+    header = await src.read(LOCAL_FILE_HEADER_SIZE)
+    if (
+        len(header) != LOCAL_FILE_HEADER_SIZE
+        or header[:4] != LOCAL_FILE_HEADER_SIGNATURE
+    ):
+        raise BadZipFile(f"Invalid local header for {file_name}")
+
+    name_length = int.from_bytes(header[26:28], "little")
+    extra_length = int.from_bytes(header[28:30], "little")
+    if __debug:
+        print(f"Done FILEPATH seek: {LOCAL_FILE_HEADER_SIZE} - {header}")
+    if name_length:
+        filename_bytes = await src.read(name_length)
+        if __debug:
+            print(f"Done FILENAME seek: {name_length} - {filename_bytes}")
+    if extra_length:
+        extra_bytes = await src.read(extra_length)
+        if __debug:
+            print(f"Done EXTRA seek: {extra_length} {extra_bytes}")
+
+
+async def _write_stored_entry(src, out, remaining, read_block, file_name):
+    """Stream an uncompressed entry out to disk."""
+    while remaining > 0:
+        chunk_size = read_block if remaining > read_block else remaining
+        buf = await src.read(chunk_size)
+        if not buf:
+            raise BadZipFile(f"Incomplete stored entry for {file_name}")
+        await out.write(buf)
+        remaining -= len(buf)
+
+
+async def _detect_window_bits(buf, __debug=None):
+    """Auto-detect window bits for compressed payloads."""
+    for window_bits in (-MAX_WBITS, MAX_WBITS | 16, MAX_WBITS):
+        try:
+            decompressobj(window_bits).decompress(buf)
+            if __debug:
+                print(f"Try WindowBits: {window_bits}")
+            return window_bits
+        except ZLIB_error:
+            if __debug:
+                print(f"Failed WindowBits: {window_bits}")
+            continue
+    raise ZLIB_error("Unable to detect compression window size")
+
+
+async def _write_compressed_entry(
+    src,
+    out,
+    remaining,
+    read_block,
+    file_name,
+    __debug=None,
+):
+    """Decompress a deflated entry while streaming to disk."""
+    if remaining == 0:
+        await out.write(b"")
+        return
+
+    first_chunk_size = read_block if remaining > read_block else remaining
+    buf = await src.read(first_chunk_size)
+    if not buf:
+        raise BadZipFile(f"Incomplete compressed entry for {file_name}")
+    remaining -= len(buf)
+
+    window_bits = await _detect_window_bits(buf, __debug=__debug)
+    decomp = decompressobj(window_bits)
+    if __debug:
+        print(f"Incoming Length: {len(buf)}")
+
+    while buf:
+        await out.write(decomp.decompress(buf))
+        if remaining <= 0:
+            break
+        chunk_size = read_block if remaining > read_block else remaining
+        buf = await src.read(chunk_size)
+        remaining -= len(buf)
+        if not buf and remaining > 0:
+            raise BadZipFile(f"Incomplete compressed entry for {file_name}")
+        if __debug:
+            print(f"Length: {len(buf)}")
+
+    await out.write(decomp.flush())
+
+
+async def unzip(  # pylint: disable=too-many-locals
+    zip_file,
+    path=None,
+    files=None,
+    regex_files=None,
+    buffer_size=None,
+    __debug=None,
+):
+    """Extract entries from a ZIP archive using async I/O."""
+    read_block = (
+        buffer_size
+        if (buffer_size and int(buffer_size) > 0)
+        else DEFAULT_READ_BUFFER_SIZE
+    )
+    file_whitelist = set(files) if files else None
+    regex_patterns = _compile_patterns(regex_files)
+
+    if not is_zipfile(zip_file):
         raise BadZipFile
+
+    if async_open is None:
+        raise RuntimeError(
+            "No async file backend available. Install aiofile or aiofiles."
+        )
+
+    with ZipFile(zip_file) as archive:
+        files_info = list(archive.infolist())
+    extra_path = "" if path is None else PurePath(path)
+
+    async with async_open(zip_file, mode="rb") as src:
+        for in_file in files_info:
+            file_name = in_file.filename
+            if not _should_extract(file_name, file_whitelist, regex_patterns):
+                continue
+
+            unpack_filename_path = Path(str(PurePath(extra_path, file_name)))
+            if __debug:
+                print(in_file)
+                print(unpack_filename_path)
+
+            if async_reader == "aiofile":
+                src.seek(in_file.header_offset)
+            else:
+                await src.seek(in_file.header_offset)
+            if __debug:
+                print(f"Done HEADER_OFFSET seek: {in_file.header_offset}")
+
+            await _read_local_header(src, file_name, __debug=__debug)
+
+            if in_file.is_dir():
+                unpack_filename_path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
+
+            async with async_open(str(unpack_filename_path), "wb+") as out:
+                remaining = in_file.compress_size
+                if in_file.compress_type == ZIP_STORED:
+                    await _write_stored_entry(
+                        src,
+                        out,
+                        remaining,
+                        read_block,
+                        file_name,
+                    )
+                else:
+                    await _write_compressed_entry(
+                        src,
+                        out,
+                        remaining,
+                        read_block,
+                        file_name,
+                        __debug=__debug,
+                    )

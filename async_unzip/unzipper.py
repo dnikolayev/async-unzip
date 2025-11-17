@@ -1,10 +1,21 @@
 """Async ZIP extraction helpers with minimal memory usage."""
 
+import asyncio
 import re
 from pathlib import PurePath, Path
 from typing import Iterable, Optional
 from zipfile import ZipFile, is_zipfile, BadZipFile, ZIP_STORED
 from zlib import decompressobj, MAX_WBITS, error as ZLIB_error
+
+try:  # pragma: no cover - optional dependency
+    import uvloop
+except ImportError:  # pragma: no cover
+    uvloop = None
+else:  # pragma: no cover
+    try:
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    except Exception:  # safety net; fallback silently
+        pass
 
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
 LOCAL_FILE_HEADER_SIZE = 30
@@ -154,12 +165,63 @@ async def _write_compressed_entry(
     await out.write(decomp.flush())
 
 
+async def _extract_entry(  # pylint: disable=too-many-arguments
+    zip_path,
+    in_file,
+    extra_path,
+    read_block,
+    __debug,
+):
+    file_name = in_file.filename
+    unpack_filename_path = Path(str(PurePath(extra_path, file_name)))
+    if __debug:
+        print(in_file)
+        print(unpack_filename_path)
+
+    if in_file.is_dir():
+        unpack_filename_path.mkdir(parents=True, exist_ok=True)
+        return
+
+    unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async with async_open(zip_path, mode="rb") as src:
+        if async_reader == "aiofile":
+            src.seek(in_file.header_offset)
+        else:
+            await src.seek(in_file.header_offset)
+        if __debug:
+            print(f"Done HEADER_OFFSET seek: {in_file.header_offset}")
+
+        await _read_local_header(src, file_name, __debug=__debug)
+
+        async with async_open(str(unpack_filename_path), "wb+") as out:
+            remaining = in_file.compress_size
+            if in_file.compress_type == ZIP_STORED:
+                await _write_stored_entry(
+                    src,
+                    out,
+                    remaining,
+                    read_block,
+                    file_name,
+                )
+            else:
+                await _write_compressed_entry(
+                    src,
+                    out,
+                    remaining,
+                    read_block,
+                    file_name,
+                    __debug=__debug,
+                )
+
+
 async def unzip(  # pylint: disable=too-many-locals
     zip_file,
     path=None,
     files=None,
     regex_files=None,
     buffer_size=None,
+    max_workers=4,
     __debug=None,
 ):
     """Extract entries from a ZIP archive using async I/O."""
@@ -183,48 +245,31 @@ async def unzip(  # pylint: disable=too-many-locals
         files_info = list(archive.infolist())
     extra_path = "" if path is None else PurePath(path)
 
-    async with async_open(zip_file, mode="rb") as src:
-        for in_file in files_info:
-            file_name = in_file.filename
-            if not _should_extract(file_name, file_whitelist, regex_patterns):
-                continue
+    selected_entries = [
+        info
+        for info in files_info
+        if _should_extract(info.filename, file_whitelist, regex_patterns)
+    ]
 
-            unpack_filename_path = Path(str(PurePath(extra_path, file_name)))
-            if __debug:
-                print(in_file)
-                print(unpack_filename_path)
+    if not selected_entries:
+        return
 
-            if async_reader == "aiofile":
-                src.seek(in_file.header_offset)
-            else:
-                await src.seek(in_file.header_offset)
-            if __debug:
-                print(f"Done HEADER_OFFSET seek: {in_file.header_offset}")
+    worker_count = max(1, int(max_workers) if max_workers else 1)
+    semaphore = asyncio.Semaphore(worker_count)
 
-            await _read_local_header(src, file_name, __debug=__debug)
+    async def _bounded_extract(entry):
+        await semaphore.acquire()
+        try:
+            await _extract_entry(
+                zip_file,
+                entry,
+                extra_path,
+                read_block,
+                __debug,
+            )
+        finally:
+            semaphore.release()
 
-            if in_file.is_dir():
-                unpack_filename_path.mkdir(parents=True, exist_ok=True)
-                continue
-
-            unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
-
-            async with async_open(str(unpack_filename_path), "wb+") as out:
-                remaining = in_file.compress_size
-                if in_file.compress_type == ZIP_STORED:
-                    await _write_stored_entry(
-                        src,
-                        out,
-                        remaining,
-                        read_block,
-                        file_name,
-                    )
-                else:
-                    await _write_compressed_entry(
-                        src,
-                        out,
-                        remaining,
-                        read_block,
-                        file_name,
-                        __debug=__debug,
-                    )
+    await asyncio.gather(
+        *(_bounded_extract(entry) for entry in selected_entries)
+    )

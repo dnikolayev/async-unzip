@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from async_unzip import unzipper
+from async_unzip import unzipper  # noqa: E402
 
 
 FIXTURES_DIR = Path(__file__).parent / "test_files"
@@ -344,6 +344,22 @@ def test_regex_argument_accepts_string(tmp_path, monkeypatch):
     assert set(extracted) == {expected_name}
 
 
+def test_parallel_extraction(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_beta.zip"
+    target = tmp_path / "parallel"
+    asyncio.run(
+        unzipper.unzip(
+            str(archive_path),
+            path=target,
+            max_workers=3,
+        )
+    )
+    extracted = _extracted_files(target)
+    expected = _expected_files(archive_path)
+    assert extracted == expected
+
+
 class _AsyncChunkStream:
     def __init__(self, chunks):
         self._chunks = list(chunks)
@@ -485,7 +501,13 @@ def test_aiofile_backend_initialization(monkeypatch):
     dummy_aiofile.async_open = fake_async_open
     original_import = builtins.__import__
 
-    def fake_import(name, globals_map=None, locals_map=None, fromlist=(), level=0):
+    def fake_import(
+        name,
+        globals_map=None,
+        locals_map=None,
+        fromlist=(),
+        level=0,
+    ):
         if name == "aiofiles":
             raise ModuleNotFoundError(name)
         return original_import(name, globals_map, locals_map, fromlist, level)
@@ -517,7 +539,13 @@ def test_buffer_size_oversized(tmp_path, monkeypatch):
     _configure_async_reader(monkeypatch, "aiofiles")
     archive_path = FIXTURES_DIR / "fixture_delta.zip"
     target = tmp_path / "large_buffer"
-    asyncio.run(unzipper.unzip(str(archive_path), path=target, buffer_size=1000000))
+    asyncio.run(
+        unzipper.unzip(
+            str(archive_path),
+            path=target,
+            buffer_size=1_000_000,
+        )
+    )
     extracted = _extracted_files(target)
     expected = _expected_files(archive_path)
     assert extracted == expected
@@ -551,3 +579,33 @@ def test_unicode_filenames(tmp_path, monkeypatch):
     extracted = _extracted_files(destination)
     assert "файл/données.txt" in extracted
     assert extracted["файл/données.txt"] == len("unicode content")
+
+
+def test_uvloop_policy_applied(monkeypatch):
+    """Ensure uvloop is hooked when available."""
+    dummy_uvloop = types.ModuleType("uvloop")
+
+    class _DummyPolicy:
+        pass
+
+    dummy_policy = _DummyPolicy()
+
+    def policy_factory():
+        return dummy_policy
+
+    dummy_uvloop.EventLoopPolicy = policy_factory
+    captured = {}
+
+    def fake_set_event_loop_policy(policy):
+        captured["policy"] = policy
+
+    with monkeypatch.context() as ctx:
+        ctx.setitem(sys.modules, "uvloop", dummy_uvloop)
+        ctx.setattr(
+            asyncio,
+            "set_event_loop_policy",
+            fake_set_event_loop_policy,
+        )
+        importlib.reload(unzipper)
+        assert captured["policy"] is dummy_policy
+    importlib.reload(unzipper)

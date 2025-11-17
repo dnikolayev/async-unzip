@@ -9,11 +9,10 @@ import gzip
 import importlib
 import sys
 import types
-from pathlib import Path
-from typing import Set
 import zipfile
 import zlib
-
+from pathlib import Path
+from typing import Set
 from zipfile import BadZipFile
 from zlib import error as ZLIB_error
 
@@ -24,7 +23,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from async_unzip import unzipper  # noqa: E402
-
 
 FIXTURES_DIR = Path(__file__).parent / "test_files"
 FIXTURE_EXPECTATIONS = {

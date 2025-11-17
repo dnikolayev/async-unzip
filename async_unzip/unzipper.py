@@ -2,14 +2,12 @@
 
 import asyncio
 import re
-from pathlib import PurePath, Path
+from pathlib import Path, PurePath
 from typing import Iterable, Optional
-from zipfile import ZipFile, is_zipfile, BadZipFile, ZIP_STORED
-from zlib import (
-    decompressobj as _zlib_decompressobj,
-    MAX_WBITS,
-    error as ZLIB_error,
-)
+from zipfile import ZIP_STORED, BadZipFile, ZipFile, is_zipfile
+from zlib import MAX_WBITS
+from zlib import decompressobj as _zlib_decompressobj
+from zlib import error as ZLIB_error
 
 try:  # pragma: no cover - optional dependency
     import uvloop

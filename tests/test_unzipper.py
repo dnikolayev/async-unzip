@@ -710,8 +710,35 @@ def test_zlibng_backend_selected_when_available(monkeypatch):
     dummy_pkg.zlib_ng = dummy_module
 
     with monkeypatch.context() as ctx:
+        ctx.delitem(sys.modules, "isal", raising=False)
+        ctx.delitem(sys.modules, "isal.isal_zlib", raising=False)
+
+        original_import = builtins.__import__
+
+        def fake_import(
+            name,
+            globals_map=None,
+            locals_map=None,
+            fromlist=(),
+            level=0,
+        ):
+            if name.startswith("isal"):
+                raise ModuleNotFoundError(name)
+            return original_import(
+                name,
+                globals_map,
+                locals_map,
+                fromlist,
+                level,
+            )
+
+        ctx.setattr(builtins, "__import__", fake_import)
         ctx.setitem(sys.modules, "zlib_ng", dummy_pkg)
-        ctx.setitem(sys.modules, "zlib_ng.zlib_ng", dummy_module)
+        ctx.setitem(
+            sys.modules,
+            "zlib_ng.zlib_ng",
+            dummy_module,
+        )
         module = importlib.reload(unzipper)
         assert module.DECOMPRESS_BACKEND == "zlib-ng"
     importlib.reload(unzipper)

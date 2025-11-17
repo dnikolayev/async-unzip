@@ -255,11 +255,14 @@ async def unzip(  # pylint: disable=too-many-locals
         return
 
     worker_count = max(1, int(max_workers) if max_workers else 1)
-    semaphore = asyncio.Semaphore(worker_count)
+    try:
+        asyncio.get_running_loop()
+        semaphore = asyncio.Semaphore(worker_count)
+    except RuntimeError:
+        semaphore = None
 
-    async def _bounded_extract(entry):
-        await semaphore.acquire()
-        try:
+    if semaphore is None or worker_count == 1 or len(selected_entries) == 1:
+        for entry in selected_entries:
             await _extract_entry(
                 zip_file,
                 entry,
@@ -267,8 +270,17 @@ async def unzip(  # pylint: disable=too-many-locals
                 read_block,
                 __debug,
             )
-        finally:
-            semaphore.release()
+        return
+
+    async def _bounded_extract(entry):
+        async with semaphore:
+            await _extract_entry(
+                zip_file,
+                entry,
+                extra_path,
+                read_block,
+                __debug,
+            )
 
     await asyncio.gather(
         *(_bounded_extract(entry) for entry in selected_entries)

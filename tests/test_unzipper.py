@@ -360,6 +360,29 @@ def test_parallel_extraction(tmp_path, monkeypatch):
     assert extracted == expected
 
 
+def test_parallel_extraction_without_running_loop(tmp_path, monkeypatch):
+    """Ensure fallback to sequential path when no running loop."""
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_beta.zip"
+    target = tmp_path / "parallel-fallback"
+
+    def fake_get_running_loop():
+        raise RuntimeError("no running loop")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", fake_get_running_loop)
+
+    asyncio.run(
+        unzipper.unzip(
+            str(archive_path),
+            path=target,
+            max_workers=8,
+        )
+    )
+    extracted = _extracted_files(target)
+    expected = _expected_files(archive_path)
+    assert extracted == expected
+
+
 class _AsyncChunkStream:
     def __init__(self, chunks):
         self._chunks = list(chunks)

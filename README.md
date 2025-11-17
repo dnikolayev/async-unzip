@@ -5,7 +5,7 @@ Also, prevents having Asyncio Timeout errors especially in case of many workers 
 
 Fully tested on Python 3.7 through 3.14.
 
-By default the extractor schedules up to 4 concurrent workers. Tune concurrency via the `max_workers` argument:
+By default the extractor schedules up to 4 concurrent workers using the stdlib `zlib` backend. Tune concurrency via the `max_workers` argument, and install `python-isal` or `zlib-ng` if you want to force those accelerators via the optional `backend` parameter:
 
 ```python
 asyncio.run(unzip('archive.zip', path='output', max_workers=8))
@@ -13,7 +13,57 @@ asyncio.run(unzip('archive.zip', path='output', max_workers=8))
 
 When `uvloop` is installed, the event loop policy switches automatically to leverage its faster reactor.
 
-When `python-isal` or `zlib-ng` is installed, async-unzip automatically switches to their faster zlib-compatible decompressors; otherwise it falls back to the standard library zlib.
+When `python-isal` or `zlib-ng` is installed you can opt into them via `backend="python-isal"` or `backend="zlib-ng"`; otherwise the stdlib `zlib` backend remains the default.
+
+## Usage Examples
+
+```python
+import asyncio
+from async_unzip import unzipper
+
+# Basic usage (defaults to stdlib zlib, max_workers=4)
+asyncio.run(unzipper.unzip("tests/test_files/fixture_beta.zip", path="output"))
+
+# Force python-isal backend and custom worker count
+asyncio.run(
+    unzipper.unzip(
+        "tests/test_files/fixture_gamma.zip",
+        path="output_isal",
+        backend="python-isal",
+        max_workers=2,
+    )
+)
+
+# Specify a whitelist of files and a regex filter
+asyncio.run(
+    unzipper.unzip(
+        "archive.zip",
+        path="filtered",
+        files=["docs/readme.txt"],
+        regex_files=[r"images/.*\\.png$"],
+    )
+)
+```
+
+### Optional backends
+
+```bash
+pip install python-isal    # to enable backend="python-isal"
+pip install zlib-ng        # to enable backend="zlib-ng"
+```
+
+### Benchmark script
+
+Use the helper under `scripts/bench_async_metrics.py` to reproduce the CPU/memory data in the tables below:
+
+```bash
+python scripts/bench_async_metrics.py \
+  --archives tests/test_files/fixture_gamma.zip \
+             large:~/Downloads/some_large.zip \
+  --workers 1 2 4 \
+  --backend zlib-ng \
+  --samples 3
+```
 
 ## Benchmarks
 
@@ -68,3 +118,24 @@ import asyncio
 
 asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 ```
+
+## Changelog
+
+### 0.5.2
+- Added usage examples, backend-installation notes, and benchmark-script instructions.
+- Introduced zlib backend selection parameter (`backend="..."`) and made stdlib zlib the explicit default even when accelerators are installed.
+- Added deterministic benchmark script under `scripts/bench_async_metrics.py` for reproducibility.
+
+### 0.5.1
+- Added zlib-ng backend option alongside python-isal and documented how to select backends explicitly.
+- Introduced backend registry and optional `backend="..."` parameter (defaulting to stdlib zlib).
+- Documented detailed time/CPU/memory benchmarks for async extraction on Apple Silicon macOS.
+- Added synchronous `zipfile.extractall()` comparison table.
+
+### 0.5.0
+- Added directory-creation caching and adaptive buffer sizing.
+- Introduced backend auto-detection for python-isal; updated tests to cover new behaviors.
+- Improved README benchmark section.
+
+### 0.4.x
+- Initial async unzipper with concurrency, window-bits caching, and various bug fixes.

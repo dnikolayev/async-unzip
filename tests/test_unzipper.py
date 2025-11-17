@@ -473,3 +473,81 @@ def test_write_compressed_entry_logs_failed_window_bits(capsys):
     )
     assert b"payload" in b"".join(recorder.data)
     assert "Failed WindowBits" in capsys.readouterr().out
+
+
+def test_aiofile_backend_initialization(monkeypatch):
+    """Test that aiofile backend is selected when only aiofile is available."""
+    dummy_aiofile = types.ModuleType("aiofile")
+
+    def fake_async_open(*_args, **_kwargs):
+        return object()
+
+    dummy_aiofile.async_open = fake_async_open
+    original_import = builtins.__import__
+
+    def fake_import(name, globals_map=None, locals_map=None, fromlist=(), level=0):
+        if name == "aiofiles":
+            raise ModuleNotFoundError(name)
+        return original_import(name, globals_map, locals_map, fromlist, level)
+
+    with monkeypatch.context() as ctx:
+        ctx.setitem(sys.modules, "aiofile", dummy_aiofile)
+        if "aiofiles" in sys.modules:
+            ctx.delitem(sys.modules, "aiofiles", raising=False)
+        ctx.setattr(builtins, "__import__", fake_import)
+        module = importlib.reload(unzipper)
+        assert module.async_reader == "aiofile"
+        assert module.ASYNC_OPEN is not None
+    importlib.reload(unzipper)
+
+
+def test_buffer_size_minimum_valid(tmp_path, monkeypatch):
+    """Test extraction with minimum valid buffer size (1 byte)."""
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_delta.zip"
+    target = tmp_path / "min_buffer"
+    asyncio.run(unzipper.unzip(str(archive_path), path=target, buffer_size=1))
+    extracted = _extracted_files(target)
+    expected = _expected_files(archive_path)
+    assert extracted == expected
+
+
+def test_buffer_size_oversized(tmp_path, monkeypatch):
+    """Test extraction with buffer size larger than any entry."""
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_delta.zip"
+    target = tmp_path / "large_buffer"
+    asyncio.run(unzipper.unzip(str(archive_path), path=target, buffer_size=1000000))
+    extracted = _extracted_files(target)
+    expected = _expected_files(archive_path)
+    assert extracted == expected
+
+
+def test_invalid_regex_pattern(tmp_path, monkeypatch):
+    """Test extraction with malformed regex pattern raises error."""
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_delta.zip"
+    target = tmp_path / "bad_regex"
+    with pytest.raises(Exception):
+        asyncio.run(
+            unzipper.unzip(
+                str(archive_path),
+                path=target,
+                regex_files=[r"(?P<invalid"],
+            )
+        )
+
+
+def test_unicode_filenames(tmp_path, monkeypatch):
+    """Test extraction of ZIP with unicode filenames."""
+    _configure_async_reader(monkeypatch, "aiofiles")
+    info = zipfile.ZipInfo("файл/données.txt")
+    archive_path = tmp_path / "unicode.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(info, "unicode content")
+
+    destination = tmp_path / "unicode_extracted"
+    asyncio.run(unzipper.unzip(str(archive_path), path=destination))
+    extracted = _extracted_files(destination)
+    assert "файл/données.txt" in extracted
+    assert extracted["файл/données.txt"] == len("unicode content")

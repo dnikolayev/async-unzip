@@ -47,6 +47,14 @@ except ImportError:  # pragma: no cover
     _isal_zlib = None
     _IsalError = None
 
+try:  # pragma: no cover - optional dependency
+    from zlib_ng import zlib_ng as _zlibng_module
+except ImportError:  # pragma: no cover
+    _zlibng_module = None
+    _ZLIBNG_ERROR = None
+else:  # pragma: no cover
+    _ZLIBNG_ERROR = getattr(_zlibng_module, "error", None)
+
 _zstd_module = None
 _zstd_zlib = None
 
@@ -56,10 +64,15 @@ _DECOMPRESSOBJ_FACTORY = _zlib_decompressobj
 if _isal_zlib is not None:
     _DECOMPRESSOBJ_FACTORY = _isal_zlib.decompressobj
     DECOMPRESS_BACKEND = "python-isal"
+elif _zlibng_module is not None:
+    _DECOMPRESSOBJ_FACTORY = _zlibng_module.decompressobj
+    DECOMPRESS_BACKEND = "zlib-ng"
 
 DECOMPRESS_ERRORS = (ZLIB_error,)
 if _IsalError is not None:
     DECOMPRESS_ERRORS = (*DECOMPRESS_ERRORS, _IsalError)
+if '_ZLIBNG_ERROR' in globals() and _ZLIBNG_ERROR is not None:
+    DECOMPRESS_ERRORS = (*DECOMPRESS_ERRORS, _ZLIBNG_ERROR)
 
 try:
     from aiofile import async_open as _AIOFILE_OPEN

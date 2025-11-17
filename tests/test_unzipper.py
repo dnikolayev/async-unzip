@@ -692,3 +692,26 @@ def test_isal_backend_selected_when_available(monkeypatch):
         module = importlib.reload(unzipper)
         assert module.DECOMPRESS_BACKEND == "python-isal"
     importlib.reload(unzipper)
+
+
+def test_zlibng_backend_selected_when_available(monkeypatch):
+    """Ensure zlib-ng backend activates when module is present."""
+    dummy_pkg = types.ModuleType("zlib_ng")
+    dummy_module = types.ModuleType("zlib_ng.zlib_ng")
+
+    class _DummyError(Exception):
+        pass
+
+    def dummy_decompressobj(wbits=15, zdict=None):
+        return zlib.decompressobj(wbits)
+
+    dummy_module.decompressobj = dummy_decompressobj
+    dummy_module.error = _DummyError
+    dummy_pkg.zlib_ng = dummy_module
+
+    with monkeypatch.context() as ctx:
+        ctx.setitem(sys.modules, "zlib_ng", dummy_pkg)
+        ctx.setitem(sys.modules, "zlib_ng.zlib_ng", dummy_module)
+        module = importlib.reload(unzipper)
+        assert module.DECOMPRESS_BACKEND == "zlib-ng"
+    importlib.reload(unzipper)

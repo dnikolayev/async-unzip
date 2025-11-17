@@ -55,24 +55,34 @@ except ImportError:  # pragma: no cover
 else:  # pragma: no cover
     _ZLIBNG_ERROR = getattr(_zlibng_module, "error", None)
 
-_zstd_module = None
-_zstd_zlib = None
+_AVAILABLE_BACKENDS = {
+    "zlib": {
+        "factory": _zlib_decompressobj,
+        "errors": (ZLIB_error,),
+    },
+}
 
-DECOMPRESS_BACKEND = "zlib"
-_DECOMPRESSOBJ_FACTORY = _zlib_decompressobj
+if _zlibng_module is not None:
+    errors = (ZLIB_error,)
+    if _ZLIBNG_ERROR is not None:
+        errors += (_ZLIBNG_ERROR,)
+    _AVAILABLE_BACKENDS["zlib-ng"] = {
+        "factory": _zlibng_module.decompressobj,
+        "errors": errors,
+    }
 
 if _isal_zlib is not None:
-    _DECOMPRESSOBJ_FACTORY = _isal_zlib.decompressobj
-    DECOMPRESS_BACKEND = "python-isal"
-elif _zlibng_module is not None:
-    _DECOMPRESSOBJ_FACTORY = _zlibng_module.decompressobj
-    DECOMPRESS_BACKEND = "zlib-ng"
+    errors = (ZLIB_error,)
+    if _IsalError is not None:
+        errors += (_IsalError,)
+    _AVAILABLE_BACKENDS["python-isal"] = {
+        "factory": _isal_zlib.decompressobj,
+        "errors": errors,
+    }
 
-DECOMPRESS_ERRORS = (ZLIB_error,)
-if _IsalError is not None:
-    DECOMPRESS_ERRORS = (*DECOMPRESS_ERRORS, _IsalError)
-if '_ZLIBNG_ERROR' in globals() and _ZLIBNG_ERROR is not None:
-    DECOMPRESS_ERRORS = (*DECOMPRESS_ERRORS, _ZLIBNG_ERROR)
+DEFAULT_BACKEND = "zlib"
+DECOMPRESS_BACKEND = DEFAULT_BACKEND  # last used backend
+AVAILABLE_BACKENDS = tuple(_AVAILABLE_BACKENDS.keys())
 
 try:
     from aiofile import async_open as _AIOFILE_OPEN
@@ -108,6 +118,19 @@ else:
 async_open = ASYNC_OPEN
 async_reader = ASYNC_READER  # pylint: disable=invalid-name
 missed_modules = MISSED_MODULES
+LAST_USED_BACKEND = DEFAULT_BACKEND
+
+
+def _resolve_backend(name):
+    backend_name = (name or DEFAULT_BACKEND).lower()
+    if backend_name not in _AVAILABLE_BACKENDS:
+        raise ValueError(
+            f"Unknown backend '{backend_name}'. "
+            f"Available: {', '.join(AVAILABLE_BACKENDS)}"
+        )
+    factory = _AVAILABLE_BACKENDS[backend_name]["factory"]
+    errors = _AVAILABLE_BACKENDS[backend_name]["errors"]
+    return backend_name, factory, errors
 
 
 def _compile_patterns(regex_files: Optional[Iterable[str]]):
@@ -164,29 +187,40 @@ async def _write_stored_entry(src, out, remaining, read_block, file_name):
         remaining -= len(buf)
 
 
-async def _probe_window_bits(buf, __debug=None):
+async def _probe_window_bits(buf, error_types, factory, __debug=None):
     """Auto-detect window bits for compressed payloads."""
     for window_bits in (-MAX_WBITS, MAX_WBITS | 16, MAX_WBITS):
         try:
-            _DECOMPRESSOBJ_FACTORY(window_bits).decompress(buf)
+            factory(window_bits).decompress(buf)
             if __debug:
                 print(f"Try WindowBits: {window_bits}")
             return window_bits
-        except DECOMPRESS_ERRORS:
+        except error_types:
             if __debug:
                 print(f"Failed WindowBits: {window_bits}")
             continue
     raise ZLIB_error("Unable to detect compression window size")
 
 
-async def _detect_window_bits(buf, cache_key=None, __debug=None):
+async def _detect_window_bits(
+    buf,
+    error_types,
+    factory,
+    cache_key=None,
+    __debug=None,
+):
     """Return cached window bits or probe and cache the result."""
     if cache_key:
         cached = _WINDOW_BITS_CACHE.get(cache_key)
         if cached is not None:
             return cached
 
-    window_bits = await _probe_window_bits(buf, __debug=__debug)
+    window_bits = await _probe_window_bits(
+        buf,
+        error_types,
+        factory,
+        __debug=__debug,
+    )
     if cache_key:
         _WINDOW_BITS_CACHE[cache_key] = window_bits
     return window_bits
@@ -199,6 +233,8 @@ async def _write_compressed_entry(
     read_block,
     file_name,
     cache_key,
+    error_types,
+    factory,
     __debug=None,
 ):
     """Decompress a deflated entry while streaming to disk."""
@@ -214,10 +250,12 @@ async def _write_compressed_entry(
 
     window_bits = await _detect_window_bits(
         buf,
+        error_types,
+        factory,
         cache_key=cache_key,
         __debug=__debug,
     )
-    decomp = _DECOMPRESSOBJ_FACTORY(window_bits)
+    decomp = factory(window_bits)
     if __debug:
         print(f"Incoming Length: {len(buf)}")
 
@@ -242,6 +280,9 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
     extra_path,
     user_buffer,
     created_dirs,
+    cache_key,
+    error_types,
+    factory,
     __debug,
 ):
     file_name = in_file.filename
@@ -287,7 +328,9 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
                     remaining,
                     read_block,
                     file_name,
-                    cache_key=str(zip_path),
+                    cache_key=cache_key,
+                    error_types=error_types,
+                    factory=factory,
                     __debug=__debug,
                 )
 
@@ -299,6 +342,7 @@ async def unzip(  # pylint: disable=too-many-locals
     regex_files=None,
     buffer_size=None,
     max_workers=4,
+    backend=None,
     __debug=None,
 ):
     """Extract entries from a ZIP archive using async I/O."""
@@ -313,6 +357,11 @@ async def unzip(  # pylint: disable=too-many-locals
         raise RuntimeError(
             "No async file backend available. Install aiofile or aiofiles."
         )
+
+    backend_name, decompress_factory, error_types = _resolve_backend(backend)
+    global DECOMPRESS_BACKEND, LAST_USED_BACKEND
+    DECOMPRESS_BACKEND = backend_name
+    LAST_USED_BACKEND = backend_name
 
     with ZipFile(zip_file) as archive:
         files_info = list(archive.infolist())
@@ -329,6 +378,7 @@ async def unzip(  # pylint: disable=too-many-locals
 
     worker_count = max(1, int(max_workers) if max_workers else 1)
     created_dirs = set()
+    cache_key = f"{backend_name}:{zip_file}"
     try:
         asyncio.get_running_loop()
         semaphore = asyncio.Semaphore(worker_count)
@@ -343,6 +393,9 @@ async def unzip(  # pylint: disable=too-many-locals
                 extra_path,
                 user_buffer,
                 created_dirs,
+                cache_key,
+                error_types,
+                decompress_factory,
                 __debug,
             )
         return
@@ -355,6 +408,9 @@ async def unzip(  # pylint: disable=too-many-locals
                 extra_path,
                 user_buffer,
                 created_dirs,
+                cache_key,
+                error_types,
+                decompress_factory,
                 __debug,
             )
 

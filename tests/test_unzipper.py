@@ -85,6 +85,11 @@ FIXTURE_EXPECTATIONS = {
 }
 
 
+def _zlib_backend_args():
+    _, factory, errors = unzipper._resolve_backend("zlib")
+    return factory, errors
+
+
 def _make_async_open(sync_seek: bool):
     """Create an aiofile/aiofiles-compatible factory backed by stdlib I/O."""
 
@@ -394,9 +399,14 @@ def test_window_bits_cache_reuse(tmp_path, monkeypatch):
 
     original_probe = unzipper._probe_window_bits
 
-    async def spy_probe(buf, __debug=None):
+    async def spy_probe(buf, error_types, factory, __debug=None):
         calls["count"] += 1
-        return await original_probe(buf, __debug=__debug)
+        return await original_probe(
+            buf,
+            error_types,
+            factory,
+            __debug=__debug,
+        )
 
     monkeypatch.setattr(unzipper, "_probe_window_bits", spy_probe)
     asyncio.run(unzipper.unzip(str(archive_path), path=target))
@@ -455,6 +465,7 @@ def test_write_stored_entry_detects_truncation():
 def test_write_compressed_entry_handles_empty_payload():
     recorder = _AsyncRecorder()
     unzipper._WINDOW_BITS_CACHE.clear()
+    factory, errors = _zlib_backend_args()
     asyncio.run(
         unzipper._write_compressed_entry(
             _AsyncChunkStream([]),
@@ -463,6 +474,8 @@ def test_write_compressed_entry_handles_empty_payload():
             read_block=4,
             file_name="empty",
             cache_key="test",
+            error_types=errors,
+            factory=factory,
         )
     )
     assert recorder.data == [b""]
@@ -470,6 +483,7 @@ def test_write_compressed_entry_handles_empty_payload():
 
 def test_write_compressed_entry_rejects_empty_initial_chunk():
     stream = _AsyncChunkStream([b""])
+    factory, errors = _zlib_backend_args()
     with pytest.raises(BadZipFile):
         unzipper._WINDOW_BITS_CACHE.clear()
         asyncio.run(
@@ -480,6 +494,8 @@ def test_write_compressed_entry_rejects_empty_initial_chunk():
                 read_block=4,
                 file_name="compressed",
                 cache_key="test",
+                error_types=errors,
+                factory=factory,
             )
         )
 
@@ -494,12 +510,8 @@ def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
         def flush(self):
             return b""
 
-    monkeypatch.setattr(
-        unzipper,
-        "_DECOMPRESSOBJ_FACTORY",
-        lambda _wbits=15: _BrokenDecomp(),
-    )
-
+    factory = lambda _wbits=15, zdict=None: _BrokenDecomp()  # noqa: E731
+    errors = (ZLIB_error,)
     with pytest.raises(ZLIB_error):
         unzipper._WINDOW_BITS_CACHE.clear()
         asyncio.run(
@@ -510,6 +522,8 @@ def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
                 read_block=4,
                 file_name="bad",
                 cache_key="test",
+                error_types=errors,
+                factory=factory,
             )
         )
 
@@ -517,6 +531,7 @@ def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
 def test_write_compressed_entry_detects_truncated_stream():
     payload = zlib.compress(b"payload")
     stream = _AsyncChunkStream([payload, b""])
+    factory, errors = _zlib_backend_args()
     with pytest.raises(BadZipFile):
         unzipper._WINDOW_BITS_CACHE.clear()
         asyncio.run(
@@ -527,6 +542,8 @@ def test_write_compressed_entry_detects_truncated_stream():
                 read_block=len(payload),
                 file_name="payload",
                 cache_key="test",
+                error_types=errors,
+                factory=factory,
             )
         )
 
@@ -536,6 +553,7 @@ def test_write_compressed_entry_logs_failed_window_bits(capsys):
     stream = _AsyncChunkStream([payload])
     recorder = _AsyncRecorder()
     unzipper._WINDOW_BITS_CACHE.clear()
+    factory, errors = _zlib_backend_args()
     asyncio.run(
         unzipper._write_compressed_entry(
             stream,
@@ -544,6 +562,8 @@ def test_write_compressed_entry_logs_failed_window_bits(capsys):
             read_block=len(payload),
             file_name="gzip",
             cache_key="test",
+            error_types=errors,
+            factory=factory,
             __debug=True,
         )
     )
@@ -690,7 +710,9 @@ def test_isal_backend_selected_when_available(monkeypatch):
         ctx.setitem(sys.modules, "isal", dummy_isal)
         ctx.setitem(sys.modules, "isal.isal_zlib", dummy_isal_zlib)
         module = importlib.reload(unzipper)
-        assert module.DECOMPRESS_BACKEND == "python-isal"
+        assert "python-isal" in module.AVAILABLE_BACKENDS
+        backend_name, _, _ = module._resolve_backend("python-isal")
+        assert backend_name == "python-isal"
     importlib.reload(unzipper)
 
 
@@ -740,5 +762,7 @@ def test_zlibng_backend_selected_when_available(monkeypatch):
             dummy_module,
         )
         module = importlib.reload(unzipper)
-        assert module.DECOMPRESS_BACKEND == "zlib-ng"
+        assert "zlib-ng" in module.AVAILABLE_BACKENDS
+        backend_name, _, _ = module._resolve_backend("zlib-ng")
+        assert backend_name == "zlib-ng"
     importlib.reload(unzipper)

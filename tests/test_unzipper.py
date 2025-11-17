@@ -9,10 +9,10 @@ import gzip
 import importlib
 import sys
 import types
-from typing import Set
-import zlib
 from pathlib import Path
+from typing import Set
 import zipfile
+import zlib
 
 from zipfile import BadZipFile
 from zlib import error as ZLIB_error
@@ -494,7 +494,11 @@ def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
         def flush(self):
             return b""
 
-    monkeypatch.setattr(unzipper, "decompressobj", lambda _: _BrokenDecomp())
+    monkeypatch.setattr(
+        unzipper,
+        "_DECOMPRESSOBJ_FACTORY",
+        lambda _wbits=15: _BrokenDecomp(),
+    )
 
     with pytest.raises(ZLIB_error):
         unzipper._WINDOW_BITS_CACHE.clear()
@@ -664,4 +668,27 @@ def test_uvloop_policy_applied(monkeypatch):
         )
         importlib.reload(unzipper)
         assert captured["policy"] is dummy_policy
+    importlib.reload(unzipper)
+
+
+def test_isal_backend_selected_when_available(monkeypatch):
+    """Ensure python-isal is preferred when present."""
+    dummy_isal = types.ModuleType("isal")
+    dummy_isal_zlib = types.ModuleType("isal.isal_zlib")
+
+    class _DummyIsalError(Exception):
+        pass
+
+    def dummy_decompressobj(wbits=15):
+        return zlib.decompressobj(wbits)
+
+    dummy_isal_zlib.decompressobj = dummy_decompressobj
+    dummy_isal_zlib.IsalError = _DummyIsalError
+    dummy_isal.isal_zlib = dummy_isal_zlib
+
+    with monkeypatch.context() as ctx:
+        ctx.setitem(sys.modules, "isal", dummy_isal)
+        ctx.setitem(sys.modules, "isal.isal_zlib", dummy_isal_zlib)
+        module = importlib.reload(unzipper)
+        assert module.DECOMPRESS_BACKEND == "python-isal"
     importlib.reload(unzipper)

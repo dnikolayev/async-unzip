@@ -5,7 +5,11 @@ import re
 from pathlib import PurePath, Path
 from typing import Iterable, Optional
 from zipfile import ZipFile, is_zipfile, BadZipFile, ZIP_STORED
-from zlib import decompressobj, MAX_WBITS, error as ZLIB_error
+from zlib import (
+    decompressobj as _zlib_decompressobj,
+    MAX_WBITS,
+    error as ZLIB_error,
+)
 
 try:  # pragma: no cover - optional dependency
     import uvloop
@@ -18,9 +22,44 @@ else:  # pragma: no cover
         pass
 
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
+
+
+def _select_buffer_size(entry_size, user_buffer):
+    if user_buffer:
+        size = int(user_buffer)
+        return size if size > 0 else DEFAULT_READ_BUFFER_SIZE
+    if entry_size < 1_000_000:
+        return 32 * 1024
+    if entry_size > 100_000_000:
+        return 256 * 1024
+    return DEFAULT_READ_BUFFER_SIZE
+
+
 LOCAL_FILE_HEADER_SIZE = 30
 LOCAL_FILE_HEADER_SIGNATURE = b"PK\x03\x04"
 _WINDOW_BITS_CACHE = {}
+
+
+try:  # pragma: no cover - optional dependency
+    from isal import isal_zlib as _isal_zlib
+    from isal.isal_zlib import IsalError as _IsalError
+except ImportError:  # pragma: no cover
+    _isal_zlib = None
+    _IsalError = None
+
+_zstd_module = None
+_zstd_zlib = None
+
+DECOMPRESS_BACKEND = "zlib"
+_DECOMPRESSOBJ_FACTORY = _zlib_decompressobj
+
+if _isal_zlib is not None:
+    _DECOMPRESSOBJ_FACTORY = _isal_zlib.decompressobj
+    DECOMPRESS_BACKEND = "python-isal"
+
+DECOMPRESS_ERRORS = (ZLIB_error,)
+if _IsalError is not None:
+    DECOMPRESS_ERRORS = (*DECOMPRESS_ERRORS, _IsalError)
 
 try:
     from aiofile import async_open as _AIOFILE_OPEN
@@ -116,11 +155,11 @@ async def _probe_window_bits(buf, __debug=None):
     """Auto-detect window bits for compressed payloads."""
     for window_bits in (-MAX_WBITS, MAX_WBITS | 16, MAX_WBITS):
         try:
-            decompressobj(window_bits).decompress(buf)
+            _DECOMPRESSOBJ_FACTORY(window_bits).decompress(buf)
             if __debug:
                 print(f"Try WindowBits: {window_bits}")
             return window_bits
-        except ZLIB_error:
+        except DECOMPRESS_ERRORS:
             if __debug:
                 print(f"Failed WindowBits: {window_bits}")
             continue
@@ -165,7 +204,7 @@ async def _write_compressed_entry(
         cache_key=cache_key,
         __debug=__debug,
     )
-    decomp = decompressobj(window_bits)
+    decomp = _DECOMPRESSOBJ_FACTORY(window_bits)
     if __debug:
         print(f"Incoming Length: {len(buf)}")
 
@@ -188,11 +227,12 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
     zip_path,
     in_file,
     extra_path,
-    read_block,
+    user_buffer,
+    created_dirs,
     __debug,
 ):
     file_name = in_file.filename
-    unpack_filename_path = Path(str(PurePath(extra_path, file_name)))
+    unpack_filename_path = Path(extra_path) / file_name
     if __debug:
         print(in_file)
         print(unpack_filename_path)
@@ -201,7 +241,10 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
         unpack_filename_path.mkdir(parents=True, exist_ok=True)
         return
 
-    unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
+    parent_key = str(unpack_filename_path.parent)
+    if parent_key not in created_dirs:
+        unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
+        created_dirs.add(parent_key)
 
     async with async_open(zip_path, mode="rb") as src:
         if async_reader == "aiofile":
@@ -215,6 +258,7 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
 
         async with async_open(str(unpack_filename_path), "wb+") as out:
             remaining = in_file.compress_size
+            read_block = _select_buffer_size(in_file.file_size, user_buffer)
             if in_file.compress_type == ZIP_STORED:
                 await _write_stored_entry(
                     src,
@@ -245,11 +289,7 @@ async def unzip(  # pylint: disable=too-many-locals
     __debug=None,
 ):
     """Extract entries from a ZIP archive using async I/O."""
-    read_block = (
-        buffer_size
-        if (buffer_size and int(buffer_size) > 0)
-        else DEFAULT_READ_BUFFER_SIZE
-    )
+    user_buffer = buffer_size
     file_whitelist = set(files) if files else None
     regex_patterns = _compile_patterns(regex_files)
 
@@ -275,6 +315,7 @@ async def unzip(  # pylint: disable=too-many-locals
         return
 
     worker_count = max(1, int(max_workers) if max_workers else 1)
+    created_dirs = set()
     try:
         asyncio.get_running_loop()
         semaphore = asyncio.Semaphore(worker_count)
@@ -287,7 +328,8 @@ async def unzip(  # pylint: disable=too-many-locals
                 zip_file,
                 entry,
                 extra_path,
-                read_block,
+                user_buffer,
+                created_dirs,
                 __debug,
             )
         return
@@ -298,7 +340,8 @@ async def unzip(  # pylint: disable=too-many-locals
                 zip_file,
                 entry,
                 extra_path,
-                read_block,
+                user_buffer,
+                created_dirs,
                 __debug,
             )
 

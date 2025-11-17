@@ -13,6 +13,8 @@ asyncio.run(unzip('archive.zip', path='output', max_workers=8))
 
 When `uvloop` is installed, the event loop policy switches automatically to leverage its faster reactor.
 
+When `python-isal` is installed, async-unzip automatically switches to its faster zlib-compatible decompressor; otherwise it falls back to the standard library zlib.
+
 From version 0.3.6 module doesn't require, but expects to have `aiofile` OR `aiofiles` to be installed for I/O operations.
 However, `aiofile` is recommended for linux, just don't forget to install `libaio` (`libaio1`) linux module (e.g., `apt install -y libaio1` for debian)
 

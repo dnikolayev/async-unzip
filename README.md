@@ -139,3 +139,9 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 
 ### 0.4.x
 - Initial async unzipper with concurrency, window-bits caching, and various bug fixes.
+
+# test
+```bash
+pip install tox
+tox
+```

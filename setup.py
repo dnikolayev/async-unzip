@@ -40,6 +40,9 @@ setup(
     include_package_data=False,
     license="MIT",
     zip_safe=False,
+    extras_require={
+        'dev': ['tox', 'pytest', 'pytest-asyncio'],
+    },
     keywords="async unzip",
     classifiers=[
         "Intended Audience :: Developers",

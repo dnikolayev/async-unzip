@@ -383,6 +383,29 @@ def test_parallel_extraction_without_running_loop(tmp_path, monkeypatch):
     assert extracted == expected
 
 
+def test_window_bits_cache_reuse(tmp_path, monkeypatch):
+    """Ensure window bits detection is cached per archive."""
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_delta.zip"
+    target = tmp_path / "cache"
+    unzipper._WINDOW_BITS_CACHE.clear()
+
+    calls = {"count": 0}
+
+    original_probe = unzipper._probe_window_bits
+
+    async def spy_probe(buf, __debug=None):
+        calls["count"] += 1
+        return await original_probe(buf, __debug=__debug)
+
+    monkeypatch.setattr(unzipper, "_probe_window_bits", spy_probe)
+    asyncio.run(unzipper.unzip(str(archive_path), path=target))
+    assert calls["count"] == 1
+    extracted = _extracted_files(target)
+    expected = _expected_files(archive_path)
+    assert extracted == expected
+
+
 class _AsyncChunkStream:
     def __init__(self, chunks):
         self._chunks = list(chunks)
@@ -431,6 +454,7 @@ def test_write_stored_entry_detects_truncation():
 
 def test_write_compressed_entry_handles_empty_payload():
     recorder = _AsyncRecorder()
+    unzipper._WINDOW_BITS_CACHE.clear()
     asyncio.run(
         unzipper._write_compressed_entry(
             _AsyncChunkStream([]),
@@ -438,6 +462,7 @@ def test_write_compressed_entry_handles_empty_payload():
             remaining=0,
             read_block=4,
             file_name="empty",
+            cache_key="test",
         )
     )
     assert recorder.data == [b""]
@@ -446,6 +471,7 @@ def test_write_compressed_entry_handles_empty_payload():
 def test_write_compressed_entry_rejects_empty_initial_chunk():
     stream = _AsyncChunkStream([b""])
     with pytest.raises(BadZipFile):
+        unzipper._WINDOW_BITS_CACHE.clear()
         asyncio.run(
             unzipper._write_compressed_entry(
                 stream,
@@ -453,6 +479,7 @@ def test_write_compressed_entry_rejects_empty_initial_chunk():
                 remaining=5,
                 read_block=4,
                 file_name="compressed",
+                cache_key="test",
             )
         )
 
@@ -470,6 +497,7 @@ def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
     monkeypatch.setattr(unzipper, "decompressobj", lambda _: _BrokenDecomp())
 
     with pytest.raises(ZLIB_error):
+        unzipper._WINDOW_BITS_CACHE.clear()
         asyncio.run(
             unzipper._write_compressed_entry(
                 stream,
@@ -477,6 +505,7 @@ def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
                 remaining=4,
                 read_block=4,
                 file_name="bad",
+                cache_key="test",
             )
         )
 
@@ -485,6 +514,7 @@ def test_write_compressed_entry_detects_truncated_stream():
     payload = zlib.compress(b"payload")
     stream = _AsyncChunkStream([payload, b""])
     with pytest.raises(BadZipFile):
+        unzipper._WINDOW_BITS_CACHE.clear()
         asyncio.run(
             unzipper._write_compressed_entry(
                 stream,
@@ -492,6 +522,7 @@ def test_write_compressed_entry_detects_truncated_stream():
                 remaining=len(payload) + 5,
                 read_block=len(payload),
                 file_name="payload",
+                cache_key="test",
             )
         )
 
@@ -500,6 +531,7 @@ def test_write_compressed_entry_logs_failed_window_bits(capsys):
     payload = gzip.compress(b"payload")
     stream = _AsyncChunkStream([payload])
     recorder = _AsyncRecorder()
+    unzipper._WINDOW_BITS_CACHE.clear()
     asyncio.run(
         unzipper._write_compressed_entry(
             stream,
@@ -507,6 +539,7 @@ def test_write_compressed_entry_logs_failed_window_bits(capsys):
             remaining=len(payload),
             read_block=len(payload),
             file_name="gzip",
+            cache_key="test",
             __debug=True,
         )
     )

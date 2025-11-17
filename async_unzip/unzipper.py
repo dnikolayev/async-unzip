@@ -20,6 +20,7 @@ else:  # pragma: no cover
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
 LOCAL_FILE_HEADER_SIZE = 30
 LOCAL_FILE_HEADER_SIGNATURE = b"PK\x03\x04"
+_WINDOW_BITS_CACHE = {}
 
 try:
     from aiofile import async_open as _AIOFILE_OPEN
@@ -111,7 +112,7 @@ async def _write_stored_entry(src, out, remaining, read_block, file_name):
         remaining -= len(buf)
 
 
-async def _detect_window_bits(buf, __debug=None):
+async def _probe_window_bits(buf, __debug=None):
     """Auto-detect window bits for compressed payloads."""
     for window_bits in (-MAX_WBITS, MAX_WBITS | 16, MAX_WBITS):
         try:
@@ -126,12 +127,26 @@ async def _detect_window_bits(buf, __debug=None):
     raise ZLIB_error("Unable to detect compression window size")
 
 
+async def _detect_window_bits(buf, cache_key=None, __debug=None):
+    """Return cached window bits or probe and cache the result."""
+    if cache_key:
+        cached = _WINDOW_BITS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    window_bits = await _probe_window_bits(buf, __debug=__debug)
+    if cache_key:
+        _WINDOW_BITS_CACHE[cache_key] = window_bits
+    return window_bits
+
+
 async def _write_compressed_entry(
     src,
     out,
     remaining,
     read_block,
     file_name,
+    cache_key,
     __debug=None,
 ):
     """Decompress a deflated entry while streaming to disk."""
@@ -145,7 +160,11 @@ async def _write_compressed_entry(
         raise BadZipFile(f"Incomplete compressed entry for {file_name}")
     remaining -= len(buf)
 
-    window_bits = await _detect_window_bits(buf, __debug=__debug)
+    window_bits = await _detect_window_bits(
+        buf,
+        cache_key=cache_key,
+        __debug=__debug,
+    )
     decomp = decompressobj(window_bits)
     if __debug:
         print(f"Incoming Length: {len(buf)}")
@@ -211,6 +230,7 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
                     remaining,
                     read_block,
                     file_name,
+                    cache_key=str(zip_path),
                     __debug=__debug,
                 )
 

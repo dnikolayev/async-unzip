@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from setuptools import setup
+from setuptools import find_packages, setup
 
 REQUIRES = []
 
@@ -35,8 +35,9 @@ setup(
     author="Dmytro Nikolayev",
     author_email="dnikolayev@gmail.com",
     url="https://github.com/ueni-ltd/async-unzip",
-    packages=["async_unzip"],
+    packages=find_packages(exclude=["tests", "tests.*"]),
     install_requires=REQUIRES,
+    include_package_data=False,
     license="MIT",
     zip_safe=False,
     keywords="async unzip",
@@ -57,5 +58,5 @@ setup(
         "Programming Language :: Python :: 3.14",
         "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
     ],
-    tests_require=["pytest", "pytest-cov"],
+    python_requires=">=3.6",
 )

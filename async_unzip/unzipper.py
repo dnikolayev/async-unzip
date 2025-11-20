@@ -2,12 +2,15 @@
 
 import asyncio
 import re
+import tempfile
 from pathlib import Path, PurePath
-from typing import Iterable, Optional
+from typing import AsyncIterable, Iterable, Optional
 from zipfile import ZIP_STORED, BadZipFile, ZipFile, is_zipfile
-from zlib import MAX_WBITS
-from zlib import decompressobj as _zlib_decompressobj
-from zlib import error as ZLIB_error
+from zlib import (
+    MAX_WBITS,
+    decompressobj as _zlib_decompressobj,
+    error as ZLIB_error,
+)
 
 try:  # pragma: no cover - optional dependency
     import uvloop
@@ -16,7 +19,7 @@ except ImportError:  # pragma: no cover
 else:  # pragma: no cover
     try:
         asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    except Exception:  # safety net; fallback silently
+    except (RuntimeError, ValueError):  # safety net; fallback silently
         pass
 
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
@@ -60,23 +63,39 @@ _AVAILABLE_BACKENDS = {
     },
 }
 
-if _zlibng_module is not None:
+
+def _register_zlibng_backend():
+    if _zlibng_module is None:
+        return
+    decompress = getattr(_zlibng_module, "decompressobj", None)
+    if not decompress:
+        return
     errors = (ZLIB_error,)
     if _ZLIBNG_ERROR is not None:
         errors += (_ZLIBNG_ERROR,)
     _AVAILABLE_BACKENDS["zlib-ng"] = {
-        "factory": _zlibng_module.decompressobj,
+        "factory": decompress,
         "errors": errors,
     }
 
-if _isal_zlib is not None:
+
+def _register_isal_backend():
+    if _isal_zlib is None:
+        return
+    decompress = getattr(_isal_zlib, "decompressobj", None)
+    if not decompress:
+        return
     errors = (ZLIB_error,)
     if _IsalError is not None:
         errors += (_IsalError,)
     _AVAILABLE_BACKENDS["python-isal"] = {
-        "factory": _isal_zlib.decompressobj,
+        "factory": decompress,
         "errors": errors,
     }
+
+
+_register_zlibng_backend()
+_register_isal_backend()
 
 DEFAULT_BACKEND = "zlib"
 DECOMPRESS_BACKEND = DEFAULT_BACKEND  # last used backend
@@ -224,6 +243,8 @@ async def _detect_window_bits(
     return window_bits
 
 
+# pylint: disable=too-many-arguments
+# pylint: disable=too-many-positional-arguments
 async def _write_compressed_entry(
     src,
     out,
@@ -243,7 +264,9 @@ async def _write_compressed_entry(
     first_chunk_size = read_block if remaining > read_block else remaining
     buf = await src.read(first_chunk_size)
     if not buf:
-        raise BadZipFile(f"Incomplete compressed entry for {file_name}")
+        raise BadZipFile(
+            f"Incomplete compressed entry for {file_name}"
+        )
     remaining -= len(buf)
 
     window_bits = await _detect_window_bits(
@@ -265,7 +288,9 @@ async def _write_compressed_entry(
         buf = await src.read(chunk_size)
         remaining -= len(buf)
         if not buf and remaining > 0:
-            raise BadZipFile(f"Incomplete compressed entry for {file_name}")
+            raise BadZipFile(
+                f"Incomplete compressed entry for {file_name}"
+            )
         if __debug:
             print(f"Length: {len(buf)}")
 
@@ -333,7 +358,7 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
                 )
 
 
-async def unzip(  # pylint: disable=too-many-locals
+async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     zip_file,
     path=None,
     files=None,
@@ -357,9 +382,8 @@ async def unzip(  # pylint: disable=too-many-locals
         )
 
     backend_name, decompress_factory, error_types = _resolve_backend(backend)
-    global DECOMPRESS_BACKEND, LAST_USED_BACKEND
-    DECOMPRESS_BACKEND = backend_name
-    LAST_USED_BACKEND = backend_name
+    globals()["DECOMPRESS_BACKEND"] = backend_name
+    globals()["LAST_USED_BACKEND"] = backend_name
 
     with ZipFile(zip_file) as archive:
         files_info = list(archive.infolist())
@@ -415,3 +439,71 @@ async def unzip(  # pylint: disable=too-many-locals
     await asyncio.gather(
         *(_bounded_extract(entry) for entry in selected_entries)
     )
+
+
+# pylint: disable=too-many-locals
+# pylint: disable=too-many-arguments
+# pylint: disable=too-many-positional-arguments
+async def unzip_stream(
+    chunk_iterable: AsyncIterable[bytes],
+    path=None,
+    files=None,
+    regex_files=None,
+    buffer_size=None,
+    max_workers=4,
+    backend=None,
+    spool_dir=None,
+    __debug=None,
+):
+    """Extract a ZIP archive provided as an async stream of chunks.
+
+    The incoming chunks are spooled to a temporary file (optionally inside
+    ``spool_dir``) and then processed via :func:`unzip`. Supply the same
+    filtering arguments as :func:`unzip` to limit extracted entries.
+    """
+
+    if chunk_iterable is None or not hasattr(chunk_iterable, "__aiter__"):
+        raise TypeError(
+            "chunk_iterable must be an AsyncIterable yielding "
+            "bytes-like chunks"
+        )
+
+    spool_parent = (
+        Path(spool_dir) if spool_dir else Path(tempfile.gettempdir())
+    )
+    spool_parent.mkdir(parents=True, exist_ok=True)
+
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="wb",
+        suffix=".zip",
+        dir=str(spool_parent),
+        delete=False,
+    )
+    temp_path = Path(temp_file.name)
+
+    try:
+        try:
+            async for chunk in chunk_iterable:
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError(
+                        "chunk_iterable must yield bytes-like objects"
+                    )
+                if not chunk:
+                    continue
+                temp_file.write(bytes(chunk))
+            temp_file.flush()
+        finally:
+            temp_file.close()
+
+        await unzip(
+            str(temp_path),
+            path=path,
+            files=files,
+            regex_files=regex_files,
+            buffer_size=buffer_size,
+            max_workers=max_workers,
+            backend=backend,
+            __debug=__debug,
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)

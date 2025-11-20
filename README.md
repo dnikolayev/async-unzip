@@ -45,6 +45,27 @@ asyncio.run(
 )
 ```
 
+### Streaming downloads
+
+Use `unzip_stream` when ZIP bytes arrive incrementally (for example, via
+`aiohttp` downloads). The helper spools the incoming chunks to a temporary file
+and then fans out the extraction with the same backend/filter arguments as
+`unzip`.
+
+```python
+import aiohttp
+
+async def download_and_extract(url, target_dir):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            await unzipper.unzip_stream(
+                response.content.iter_chunked(64 * 1024),
+                path=target_dir,
+                backend="zlib-ng",
+                spool_dir="/tmp/async-unzip",
+            )
+```
+
 ### Optional backends
 
 ```bash
@@ -119,7 +140,23 @@ import asyncio
 asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 ```
 
+## Development workflow
+
+Run the formatters and linters locally before pushing:
+
+```bash
+source venv/bin/activate
+isort async_unzip tests
+flake8 async_unzip tests
+pylint async_unzip tests
+pytest -q
+```
+
 ## Changelog
+
+### Unreleased
+- Added `unzip_stream` to extract archives that arrive as async byte streams.
+- Documented streaming usage and ensured tests cover the new flow and error handling.
 
 ### 0.5.2
 - Added usage examples, backend-installation notes, and benchmark-script instructions.

@@ -18,11 +18,7 @@ from zlib import error as ZLIB_error
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from async_unzip import unzipper  # noqa: E402
+from async_unzip import unzipper
 
 FIXTURES_DIR = Path(__file__).parent / "test_files"
 FIXTURE_EXPECTATIONS = {
@@ -347,6 +343,73 @@ def test_regex_argument_accepts_string(tmp_path, monkeypatch):
     assert set(extracted) == {expected_name}
 
 
+def test_unzip_stream_extracts_async_chunks(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_alpha.zip"
+    destination = tmp_path / "stream"
+    spool_dir = tmp_path / "spool"
+
+    async def chunk_source():
+        payload = archive_path.read_bytes()
+        step = 1024
+        for idx in range(0, len(payload), step):
+            if idx == 0:
+                yield b""
+            yield payload[idx: idx + step]
+
+    asyncio.run(
+        unzipper.unzip_stream(
+            chunk_source(),
+            path=destination,
+            spool_dir=spool_dir,
+            backend="zlib",
+        )
+    )
+
+    expected = _expected_files(archive_path)
+    extracted = _extracted_files(destination)
+    assert extracted == expected
+    assert not any(spool_dir.iterdir())
+
+
+def test_unzip_stream_rejects_non_async_iterable(tmp_path):
+    with pytest.raises(TypeError):
+        asyncio.run(unzipper.unzip_stream([b"chunk"], path=tmp_path))
+
+
+def test_unzip_stream_rejects_non_bytes_chunks(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    spool_dir = tmp_path / "spool"
+
+    async def bad_chunks():
+        yield "not-bytes"
+
+    with pytest.raises(TypeError):
+        asyncio.run(
+            unzipper.unzip_stream(
+                bad_chunks(),
+                path=tmp_path / "out",
+                spool_dir=spool_dir,
+            )
+        )
+    assert not spool_dir.exists() or not any(spool_dir.iterdir())
+
+
+def test_unzip_skips_when_no_matching_entries(tmp_path, monkeypatch):
+    """Ensure early return when filters exclude all entries."""
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_beta.zip"
+    target = tmp_path / "no-match"
+    asyncio.run(
+        unzipper.unzip(
+            str(archive_path),
+            path=target,
+            files=["this-file-does-not-exist.txt"],
+        )
+    )
+    assert not target.exists()
+
+
 def test_parallel_extraction(tmp_path, monkeypatch):
     _configure_async_reader(monkeypatch, "aiofiles")
     archive_path = FIXTURES_DIR / "fixture_beta.zip"
@@ -498,7 +561,7 @@ def test_write_compressed_entry_rejects_empty_initial_chunk():
         )
 
 
-def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
+def test_write_compressed_entry_fails_when_window_not_detected():
     stream = _AsyncChunkStream([b"\x00\x00\x00\x00"])
 
     class _BrokenDecomp:
@@ -508,7 +571,8 @@ def test_write_compressed_entry_fails_when_window_not_detected(monkeypatch):
         def flush(self):
             return b""
 
-    factory = lambda _wbits=15, zdict=None: _BrokenDecomp()  # noqa: E731
+    def factory(_wbits=15, _zdict=None):
+        return _BrokenDecomp()
     errors = (ZLIB_error,)
     with pytest.raises(ZLIB_error):
         unzipper._WINDOW_BITS_CACHE.clear()
@@ -689,6 +753,52 @@ def test_uvloop_policy_applied(monkeypatch):
     importlib.reload(unzipper)
 
 
+def test_register_zlibng_backend_requires_valid_module(monkeypatch):
+    """Ensure registration skips when module or factory missing."""
+    with monkeypatch.context() as ctx:
+        ctx.setattr(unzipper, "_zlibng_module", None, raising=False)
+        ctx.setattr(
+            unzipper,
+            "_AVAILABLE_BACKENDS",
+            {"zlib": unzipper._AVAILABLE_BACKENDS["zlib"]},
+            raising=False,
+        )
+        unzipper._register_zlibng_backend()
+        assert "zlib-ng" not in unzipper._AVAILABLE_BACKENDS
+
+    dummy_pkg = types.SimpleNamespace(decompressobj=None)
+    with monkeypatch.context() as ctx:
+        ctx.setattr(unzipper, "_zlibng_module", dummy_pkg, raising=False)
+        ctx.setattr(
+            unzipper,
+            "_AVAILABLE_BACKENDS",
+            {"zlib": unzipper._AVAILABLE_BACKENDS["zlib"]},
+            raising=False,
+        )
+        unzipper._register_zlibng_backend()
+        assert "zlib-ng" not in unzipper._AVAILABLE_BACKENDS
+
+
+def test_register_isal_backend_requires_valid_module(monkeypatch):
+    """Ensure python-isal backend registers only with a factory."""
+    dummy = types.SimpleNamespace(decompressobj=None)
+    with monkeypatch.context() as ctx:
+        ctx.setattr(unzipper, "_isal_zlib", dummy, raising=False)
+        ctx.setattr(
+            unzipper,
+            "_AVAILABLE_BACKENDS",
+            {"zlib": unzipper._AVAILABLE_BACKENDS["zlib"]},
+            raising=False,
+        )
+        unzipper._register_isal_backend()
+        assert "python-isal" not in unzipper._AVAILABLE_BACKENDS
+
+
+def test_resolve_backend_rejects_unknown_backend():
+    with pytest.raises(ValueError):
+        unzipper._resolve_backend("definitely-not-registered")
+
+
 def test_isal_backend_selected_when_available(monkeypatch):
     """Ensure python-isal is preferred when present."""
     dummy_isal = types.ModuleType("isal")
@@ -722,7 +832,7 @@ def test_zlibng_backend_selected_when_available(monkeypatch):
     class _DummyError(Exception):
         pass
 
-    def dummy_decompressobj(wbits=15, zdict=None):
+    def dummy_decompressobj(wbits=15, _zdict=None):
         return zlib.decompressobj(wbits)
 
     dummy_module.decompressobj = dummy_decompressobj

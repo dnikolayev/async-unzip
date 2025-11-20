@@ -207,6 +207,10 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 
 ## Changelog
 
+### 0.5.5
+- Fixed per-entry window-bits caching to avoid incorrect header errors on mixed compression modes.
+- Documented new streaming parameter details and added the consolidated `run_tests.sh` helper.
+
 ### 0.5.4
 - Added `aiohttp` and `httpx` chunked-download examples for `unzip_stream`.
 - Bumped version metadata to 0.5.4 to reflect the new streaming API and docs.

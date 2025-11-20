@@ -1,7 +1,7 @@
 """Tests for async_unzip.unzipper."""
 
 # pylint: disable=protected-access,too-many-arguments,too-few-public-methods
-# pylint: disable=too-many-locals,missing-function-docstring
+# pylint: disable=too-many-locals,missing-function-docstring,too-many-lines
 
 import asyncio
 import builtins
@@ -593,7 +593,17 @@ def test_window_bits_cache_reuse(tmp_path, monkeypatch):
 
     monkeypatch.setattr(unzipper, "_probe_window_bits", spy_probe)
     asyncio.run(unzipper.unzip(str(archive_path), path=target))
-    assert calls["count"] == 1
+    expected_files = _expected_files(archive_path)
+    assert calls["count"] == len(expected_files)
+    cache_keys = {
+        key
+        for key in unzipper._WINDOW_BITS_CACHE
+        if key.startswith("zlib:")
+    }
+    assert cache_keys == {
+        f"zlib:{archive_path}:{name}"
+        for name in expected_files
+    }
     extracted = _extracted_files(target)
     expected = _expected_files(archive_path)
     assert extracted == expected

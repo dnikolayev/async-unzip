@@ -403,7 +403,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
 
     worker_count = max(1, int(max_workers) if max_workers else 1)
     created_dirs = set()
-    cache_key = f"{backend_name}:{zip_file}"
+    cache_key_base = f"{backend_name}:{zip_file}"
     try:
         asyncio.get_running_loop()
         semaphore = asyncio.Semaphore(worker_count)
@@ -412,13 +412,14 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
 
     if semaphore is None or worker_count == 1 or len(selected_entries) == 1:
         for entry in selected_entries:
+            entry_cache = f"{cache_key_base}:{entry.filename}"
             await _extract_entry(
                 zip_file,
                 entry,
                 extra_path,
                 user_buffer,
                 created_dirs,
-                cache_key,
+                entry_cache,
                 error_types,
                 decompress_factory,
                 __debug,
@@ -427,13 +428,14 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
 
     async def _bounded_extract(entry):
         async with semaphore:
+            entry_cache = f"{cache_key_base}:{entry.filename}"
             await _extract_entry(
                 zip_file,
                 entry,
                 extra_path,
                 user_buffer,
                 created_dirs,
-                cache_key,
+                entry_cache,
                 error_types,
                 decompress_factory,
                 __debug,

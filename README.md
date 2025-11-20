@@ -48,9 +48,11 @@ asyncio.run(
 ### Streaming downloads
 
 Use `unzip_stream` when ZIP bytes arrive incrementally (for example, via
-`aiohttp` downloads). The helper spools the incoming chunks to a temporary file
-and then fans out the extraction with the same backend/filter arguments as
-`unzip`.
+`aiohttp` or `httpx` downloads). The helper spools the incoming chunks to a
+temporary file (optionally in a custom `spool_dir`) and then fans out the
+extraction with the same backend/filter arguments as `unzip`.
+
+#### `aiohttp` chunked download
 
 ```python
 import aiohttp
@@ -63,6 +65,23 @@ async def download_and_extract(url, target_dir):
                 path=target_dir,
                 backend="zlib-ng",
                 spool_dir="/tmp/async-unzip",
+            )
+```
+
+#### `httpx` chunked download
+
+```python
+import httpx
+
+async def download_and_extract_httpx(url, target_dir):
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            await unzipper.unzip_stream(
+                response.aiter_bytes(chunk_size=128 * 1024),
+                path=target_dir,
+                backend="zlib",
+                spool_dir="./zip-cache",
             )
 ```
 
@@ -154,9 +173,9 @@ pytest -q
 
 ## Changelog
 
-### Unreleased
-- Added `unzip_stream` to extract archives that arrive as async byte streams.
-- Documented streaming usage and ensured tests cover the new flow and error handling.
+### 0.5.4
+- Added `aiohttp` and `httpx` chunked-download examples for `unzip_stream`.
+- Bumped version metadata to 0.5.4 to reflect the new streaming API and docs.
 
 ### 0.5.2
 - Added usage examples, backend-installation notes, and benchmark-script instructions.

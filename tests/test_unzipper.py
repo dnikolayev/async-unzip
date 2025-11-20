@@ -395,6 +395,128 @@ def test_unzip_stream_rejects_non_bytes_chunks(tmp_path, monkeypatch):
     assert not spool_dir.exists() or not any(spool_dir.iterdir())
 
 
+def test_unzip_stream_cleans_up_on_chunk_error(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    spool_dir = tmp_path / "spool"
+    archive_path = FIXTURES_DIR / "fixture_alpha.zip"
+
+    async def broken_chunks():
+        payload = archive_path.read_bytes()
+        yield payload[:1024]
+        raise RuntimeError("network boom")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            unzipper.unzip_stream(
+                broken_chunks(),
+                path=tmp_path / "out",
+                spool_dir=spool_dir,
+            )
+        )
+    assert not spool_dir.exists() or not any(spool_dir.iterdir())
+
+
+def test_unzip_stream_propagates_cancelled_error(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    spool_dir = tmp_path / "spool"
+    archive_path = FIXTURES_DIR / "fixture_alpha.zip"
+
+    async def cancelled_chunks():
+        payload = archive_path.read_bytes()
+        yield payload[:512]
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            unzipper.unzip_stream(
+                cancelled_chunks(),
+                path=tmp_path / "out",
+                spool_dir=spool_dir,
+            )
+        )
+    assert not spool_dir.exists() or not any(spool_dir.iterdir())
+
+
+def test_unzip_stream_in_memory_extracts(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_alpha.zip"
+    destination = tmp_path / "in-memory"
+    spool_dir = tmp_path / "spool"
+
+    async def chunk_source():
+        payload = archive_path.read_bytes()
+        step = 2048
+        for idx in range(0, len(payload), step):
+            yield payload[idx: idx + step]
+
+    asyncio.run(
+        unzipper.unzip_stream(
+            chunk_source(),
+            path=destination,
+            spool_dir=spool_dir,
+            in_memory=True,
+        )
+    )
+
+    expected = _expected_files(archive_path)
+    extracted = _extracted_files(destination)
+    assert extracted == expected
+    assert spool_dir.exists()
+    assert not any(spool_dir.iterdir())
+
+
+def test_unzip_stream_in_memory_handles_chunk_error(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_alpha.zip"
+    destination = tmp_path / "in-memory-error"
+    spool_dir = tmp_path / "spool"
+
+    async def broken_chunks():
+        payload = archive_path.read_bytes()
+        yield payload[:1024]
+        raise RuntimeError("stream failed")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            unzipper.unzip_stream(
+                broken_chunks(),
+                path=destination,
+                spool_dir=spool_dir,
+                in_memory=True,
+            )
+        )
+
+    assert not destination.exists()
+    assert spool_dir.exists()
+    assert not any(spool_dir.iterdir())
+
+
+def test_unzip_stream_in_memory_cancelled(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = FIXTURES_DIR / "fixture_alpha.zip"
+    destination = tmp_path / "in-memory-cancelled"
+    spool_dir = tmp_path / "spool"
+
+    async def cancelled_chunks():
+        payload = archive_path.read_bytes()
+        yield payload[:1024]
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            unzipper.unzip_stream(
+                cancelled_chunks(),
+                path=destination,
+                spool_dir=spool_dir,
+                in_memory=True,
+            )
+        )
+
+    assert not destination.exists()
+    assert spool_dir.exists()
+    assert not any(spool_dir.iterdir())
+
+
 def test_unzip_skips_when_no_matching_entries(tmp_path, monkeypatch):
     """Ensure early return when filters exclude all entries."""
     _configure_async_reader(monkeypatch, "aiofiles")

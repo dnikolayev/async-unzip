@@ -1,6 +1,9 @@
 """Async ZIP extraction helpers with minimal memory usage."""
 
 import asyncio
+import atexit
+import io
+import os
 import re
 import tempfile
 from pathlib import Path, PurePath
@@ -453,6 +456,7 @@ async def unzip_stream(
     max_workers=4,
     backend=None,
     spool_dir=None,
+    in_memory: bool = False,
     __debug=None,
 ):
     """Extract a ZIP archive provided as an async stream of chunks.
@@ -473,27 +477,102 @@ async def unzip_stream(
     )
     spool_parent.mkdir(parents=True, exist_ok=True)
 
-    temp_file = tempfile.NamedTemporaryFile(
-        mode="wb",
-        suffix=".zip",
-        dir=str(spool_parent),
-        delete=False,
-    )
-    temp_path = Path(temp_file.name)
+    async def _iter_chunks_to_buffer() -> io.BytesIO:
+        buf = io.BytesIO()
+        async for chunk in chunk_iterable:
+            if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                raise TypeError("chunk_iterable must yield bytes-like objects")
+            if not chunk:
+                continue
+            buf.write(bytes(chunk))
+        buf.seek(0)
+        return buf
+
+    async def _extract_from_buffer(buf: io.BytesIO) -> None:
+        file_whitelist = set(files) if files else None
+        regex_patterns = _compile_patterns(regex_files)
+        extra_path = "" if path is None else PurePath(path)
+
+        with ZipFile(buf) as archive:
+            selected_entries = [
+                info
+                for info in archive.infolist()
+                if _should_extract(
+                    info.filename,
+                    file_whitelist,
+                    regex_patterns,
+                )
+            ]
+
+            if not selected_entries:
+                return
+
+            created_dirs: set[str] = set()
+            for entry in selected_entries:
+                file_name = entry.filename
+                unpack_path = PurePath(file_name)
+                unpack_filename_path = Path(extra_path, unpack_path)
+
+                if entry.is_dir():
+                    unpack_filename_path.mkdir(parents=True, exist_ok=True)
+                    continue
+
+                parent_key = str(unpack_filename_path.parent)
+                if parent_key not in created_dirs:
+                    unpack_filename_path.parent.mkdir(
+                        parents=True,
+                        exist_ok=True,
+                    )
+                    created_dirs.add(parent_key)
+
+                read_block = _select_buffer_size(entry.file_size, buffer_size)
+                with archive.open(entry) as src:
+                    async with async_open(
+                        str(unpack_filename_path),
+                        "wb+",
+                    ) as out:
+                        while True:
+                            chunk = src.read(read_block)
+                            if not chunk:
+                                break
+                            await out.write(chunk)
+
+    if in_memory:
+        buffer = await _iter_chunks_to_buffer()
+        await _extract_from_buffer(buffer)
+        return
+
+    cleanup_handle = None
+    temp_path: Optional[Path] = None
 
     try:
+        fd, temp_name = tempfile.mkstemp(suffix=".zip", dir=str(spool_parent))
+        os.close(fd)
+        temp_path = Path(temp_name)
+
+        def _cleanup(path=temp_path):
+            try:
+                path.unlink(missing_ok=True)
+            except FileNotFoundError:  # pragma: no cover - already removed
+                pass
+
+        cleanup_handle = _cleanup
+        atexit.register(cleanup_handle)
+
         try:
-            async for chunk in chunk_iterable:
-                if not isinstance(chunk, (bytes, bytearray, memoryview)):
-                    raise TypeError(
-                        "chunk_iterable must yield bytes-like objects"
-                    )
-                if not chunk:
-                    continue
-                temp_file.write(bytes(chunk))
-            temp_file.flush()
+            with temp_path.open("wb") as temp_file:
+                async for chunk in chunk_iterable:
+                    if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                        raise TypeError(
+                            "chunk_iterable must yield bytes-like objects"
+                        )
+                    if not chunk:
+                        continue
+                    temp_file.write(bytes(chunk))
+                temp_file.flush()
         finally:
-            temp_file.close()
+            if cleanup_handle:
+                atexit.unregister(cleanup_handle)
 
         await unzip(
             str(temp_path),
@@ -506,4 +585,5 @@ async def unzip_stream(
             __debug=__debug,
         )
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)

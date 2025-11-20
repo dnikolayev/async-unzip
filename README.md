@@ -159,18 +159,6 @@ import asyncio
 asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 ```
 
-## Development workflow
-
-Run the formatters and linters locally before pushing:
-
-```bash
-source venv/bin/activate
-isort async_unzip tests
-flake8 async_unzip tests
-pylint async_unzip tests
-pytest -q
-```
-
 ## Changelog
 
 ### 0.5.4

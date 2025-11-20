@@ -447,6 +447,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
 # pylint: disable=too-many-locals
 # pylint: disable=too-many-arguments
 # pylint: disable=too-many-positional-arguments
+# pylint: disable=too-many-statements
 async def unzip_stream(
     chunk_iterable: AsyncIterable[bytes],
     path=None,

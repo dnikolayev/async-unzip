@@ -45,6 +45,17 @@ asyncio.run(
 )
 ```
 
+#### `unzip` parameters
+
+- `zip_file`: path-like reference to the ZIP archive.
+- `path`: optional extraction root (defaults to current working directory).
+- `files`: iterable of exact filenames to whitelist.
+- `regex_files`: string or iterable of regex patterns used to include entries.
+- `buffer_size`: override block size for reading each entry; defaults to auto.
+- `max_workers`: maximum concurrent extraction coroutines (minimum 1).
+- `backend`: decompressor choice (`zlib`, `python-isal`, `zlib-ng`).
+- `__debug`: when truthy, prints internal seek/decompression events.
+
 ### Streaming downloads
 
 Use `unzip_stream` when ZIP bytes arrive incrementally (for example, via
@@ -68,7 +79,7 @@ async def download_and_extract(url, target_dir):
             )
 ```
 
-#### `httpx` chunked download
+#### `httpx` chunked download (spooled with filters)
 
 ```python
 import httpx
@@ -80,10 +91,45 @@ async def download_and_extract_httpx(url, target_dir):
             await unzipper.unzip_stream(
                 response.aiter_bytes(chunk_size=128 * 1024),
                 path=target_dir,
-                backend="zlib",
+                files=["docs/readme.txt"],
+                regex_files=[r"images/.*\\.png$"],
+                backend="python-isal",
+                max_workers=2,
                 spool_dir="./zip-cache",
             )
 ```
+
+#### `httpx` chunked download (in-memory single worker)
+
+```python
+import httpx
+
+async def download_and_extract_httpx_mem(url, target_dir):
+    async with httpx.AsyncClient() as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            await unzipper.unzip_stream(
+                response.aiter_bytes(chunk_size=64 * 1024),
+                path=target_dir,
+                backend="zlib",
+                max_workers=1,
+                buffer_size=32 * 1024,
+                in_memory=True,
+            )
+```
+
+#### `unzip_stream` parameters
+
+- `chunk_iterable`: async iterable yielding bytes from the download stream.
+- `path`: optional destination root mirroring `unzip`.
+- `files`: whitelist list identical to `unzip`.
+- `regex_files`: regex filters identical to `unzip`.
+- `buffer_size`: read block override used during extraction.
+- `max_workers`: concurrency cap reused when extracting from the spooled file.
+- `backend`: decompressor name (`zlib`, `python-isal`, `zlib-ng`).
+- `spool_dir`: optional directory for temporary storage (defaults to system temp).
+- `in_memory`: when True, downloads into RAM and extracts without touching disk.
+- `__debug`: enables verbose progress logging just like `unzip`.
 
 ### Optional backends
 

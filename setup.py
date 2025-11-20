@@ -47,7 +47,6 @@ setup(
     classifiers=[
         "Intended Audience :: Developers",
         "Environment :: Web Environment",
-        "License :: OSI Approved :: MIT License",
         "Natural Language :: English",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.6",

@@ -166,6 +166,24 @@ def test_unzip_rejects_parent_traversal(tmp_path, monkeypatch):
     assert not (tmp_path / "escape.txt").exists()
 
 
+def test_unzip_stream_in_memory_is_deprecated(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "m.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("a.txt", b"hi")
+
+    async def chunks():
+        yield archive_path.read_bytes()
+
+    with pytest.warns(DeprecationWarning, match="in_memory=True"):
+        asyncio.run(
+            unzipper.unzip_stream(
+                chunks(), path=tmp_path / "out", in_memory=True
+            )
+        )
+    assert (tmp_path / "out" / "a.txt").read_bytes() == b"hi"
+
+
 def test_unzip_stream_in_memory_rejects_traversal(tmp_path, monkeypatch):
     _configure_async_reader(monkeypatch)
     archive_path = tmp_path / "evil.zip"

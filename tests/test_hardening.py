@@ -508,6 +508,36 @@ def test_unzip_rejects_stored_crc_mismatch(tmp_path, monkeypatch):
         asyncio.run(unzipper.unzip(str(archive_path), path=tmp_path / "out"))
 
 
+@pytest.mark.parametrize(
+    ("module", "method"),
+    [("bz2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA)],
+)
+def test_unzip_rejects_unsupported_compression(
+    tmp_path, monkeypatch, module, method
+):
+    # Only stored/deflate are supported; other methods must raise a clear
+    # NotImplementedError on the default path (not an opaque zlib error), and
+    # the in-memory path must reject them too rather than silently decode.
+    pytest.importorskip(module)
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "other.zip"
+    with zipfile.ZipFile(archive_path, "w", method) as archive:
+        archive.writestr("a.bin", b"payload" * 100)
+
+    with pytest.raises(NotImplementedError):
+        asyncio.run(unzipper.unzip(str(archive_path), path=tmp_path / "out"))
+
+    async def chunks():
+        yield archive_path.read_bytes()
+
+    with pytest.raises(NotImplementedError):
+        asyncio.run(
+            unzipper.unzip_stream(
+                chunks(), path=tmp_path / "mem", in_memory=True
+            )
+        )
+
+
 def test_unzip_accepts_honest_empty_deflated_entry(tmp_path, monkeypatch):
     # Honest empty entries must still extract: compress_size > 0 so they take
     # the guarded path with expected_size == 0.

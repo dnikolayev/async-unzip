@@ -7,3 +7,10 @@ profile = "black"
 line_length = 79
 known_first_party = ["async_unzip"]
 combine_as_imports = true
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # in_memory=True is deprecated; its dedicated test asserts the warning,
+    # the rest of the in_memory coverage should stay quiet.
+    "ignore:unzip_stream\\(in_memory=True\\) is deprecated:DeprecationWarning",
+]

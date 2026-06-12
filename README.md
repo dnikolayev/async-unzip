@@ -164,7 +164,7 @@ async def download_and_extract_httpx_mem(url, target_dir):
 - `max_workers`: concurrency cap reused when extracting from the spooled file.
 - `backend`: decompressor name (`zlib`, `python-isal`, `zlib-ng`).
 - `spool_dir`: optional directory for temporary storage (defaults to system temp).
-- `in_memory`: when True, downloads into RAM and extracts without touching disk.
+- `in_memory`: **deprecated** — buffers the whole archive in RAM, decompresses synchronously, and ignores `backend`/`max_workers`. Use the default spooled path (with `spool_dir`) instead.
 - `max_entries` / `max_entry_size` / `max_total_uncompressed_size` (keyword-only): same as `unzip`.
 - `max_archive_size` (keyword-only): cap on raw bytes read from the stream; raises `LimitExceeded` before an oversized download is fully consumed.
 - `__debug`: enables verbose progress logging just like `unzip`.
@@ -253,6 +253,7 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 - Add opt-in resource limits to `unzip`/`unzip_stream` (keyword-only, default unlimited): `max_entries`, `max_entry_size`, `max_total_uncompressed_size`, and `max_archive_size` (streams only). Breaches raise a new `LimitExceeded` exception — distinct from `BadZipFile` so policy refusals are distinguishable from corruption. Entry limits are enforced up front from the central directory (authoritative, because each entry is integrity-checked to produce exactly its declared size), so nothing is written before a breach is detected.
 - Expose `unzip`, `unzip_stream`, and `LimitExceeded` at the top level: `from async_unzip import unzip`.
 - Reject unsupported compression methods consistently: entries that are neither stored nor deflate (e.g. bzip2, lzma) now raise `NotImplementedError` on both the spooled and in-memory paths, instead of leaking an opaque zlib error (spooled) or silently decoding only in memory.
+- Deprecate `unzip_stream(in_memory=True)` (emits `DeprecationWarning`): it buffers the whole archive in RAM, decompresses synchronously, and ignores `backend`/`max_workers`, which works against the library's low-memory/async goals. Use the default spooled path (with `spool_dir`) instead; it will be removed in a future release.
 
 ### 0.6.1
 - Security: fix an infinite-loop denial of service in the deflate reader. A crafted archive declaring a `compress_size` larger than its real stream made decompression spin forever (and grow memory); the reader now stops at the deflate end-of-stream marker.

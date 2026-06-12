@@ -3,7 +3,14 @@ Asynchronous unzipping of big files with low memory usage in Python
 Helps with big zip files unpacking (memory usage + buffer_size could be changed).
 Also, prevents having Asyncio Timeout errors especially in case of many workers using same CPU cores.
 
-Fully tested on Python 3.7 through 3.14.
+Fully tested on Python 3.9 through 3.14.
+
+Extraction is hardened against malicious archives: entry names that try to
+escape the destination directory ("Zip Slip", via `../` or absolute paths)
+are rejected, encrypted entries raise a clear error instead of writing
+garbage, and decompressed output is bounded against the entry's declared size
+to limit zip-bomb exposure. `unzip` and `unzip_stream` return the list of
+paths written to disk.
 
 By default the extractor schedules up to 4 concurrent workers using the stdlib `zlib` backend. Tune concurrency via the `max_workers` argument, and install `python-isal` or `zlib-ng` if you want to force those accelerators via the optional `backend` parameter:
 
@@ -55,6 +62,10 @@ asyncio.run(
 - `max_workers`: maximum concurrent extraction coroutines (minimum 1).
 - `backend`: decompressor choice (`zlib`, `python-isal`, `zlib-ng`).
 - `__debug`: when truthy, prints internal seek/decompression events.
+
+Returns a list of `pathlib.Path` objects for the entries written to disk.
+Entries whose names escape `path` raise `BadZipFile`, and encrypted entries
+raise `NotImplementedError`.
 
 ### Streaming downloads
 
@@ -131,6 +142,10 @@ async def download_and_extract_httpx_mem(url, target_dir):
 - `in_memory`: when True, downloads into RAM and extracts without touching disk.
 - `__debug`: enables verbose progress logging just like `unzip`.
 
+Returns the list of paths written to disk. Note that `in_memory=True`
+decompresses each entry synchronously via the stdlib `zipfile` reader, so the
+`backend` and `max_workers` options only affect the default (spooled) path.
+
 ### Optional backends
 
 ```bash
@@ -206,6 +221,16 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 ```
 
 ## Changelog
+
+### 0.6.0
+- Security: reject "Zip Slip" entries whose names escape the destination directory (relative `../` traversal and absolute paths).
+- Reject encrypted entries with a clear `NotImplementedError` instead of writing corrupt output.
+- Bound decompression output per block (caps peak memory on `zlib`/`zlib-ng`) and enforce the entry's declared uncompressed size as a backend-independent zip-bomb guard.
+- `unzip` and `unzip_stream` now return the list of paths written to disk.
+- Offload central-directory parsing to a worker thread and make the streaming spool write asynchronously, so the event loop is no longer blocked on those I/O paths.
+- Bound the process-global window-bits cache so long-running services do not grow it without limit.
+- Replace the missing-backend `print` with a logging warning.
+- Packaging: require Python 3.9+ (uses `asyncio.to_thread`), refresh classifiers, add `isal`/`zlib-ng`/`speedups` extras, and add a GitHub Actions CI matrix (3.9–3.14) plus lint.
 
 ### 0.5.5
 - Fixed per-entry window-bits caching to avoid incorrect header errors on mixed compression modes.

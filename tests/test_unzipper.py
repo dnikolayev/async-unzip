@@ -66,10 +66,7 @@ FIXTURE_EXPECTATIONS = {
         "buffer_size": None,
         "use_debug": False,
         "files": [
-            (
-                "xACT2.44/xACT.app/Contents/Resources/"
-                "English.lproj/InfoPlist.strings"
-            )
+            "xACT2.44/xACT.app/Contents/Resources/" + "English.lproj/InfoPlist.strings"
         ],
     },
     "fixture_eta.zip": {
@@ -245,9 +242,7 @@ def test_unzipper_handles_entry_comments(tmp_path, monkeypatch):
 
     _configure_async_reader(monkeypatch, "aiofiles")
     destination = tmp_path / "commented"
-    asyncio.run(
-        unzipper.unzip(str(archive_path), path=destination, debug=True)
-    )
+    asyncio.run(unzipper.unzip(str(archive_path), path=destination, debug=True))
     assert (destination / "annotated" / "data.txt").read_text() == "payload"
 
 
@@ -357,7 +352,7 @@ def test_unzip_stream_extracts_async_chunks(tmp_path, monkeypatch):
         for idx in range(0, len(payload), step):
             if idx == 0:
                 yield b""
-            yield payload[idx: idx + step]
+            yield payload[idx : idx + step]
 
     asyncio.run(
         unzipper.unzip_stream(
@@ -449,7 +444,7 @@ def test_unzip_stream_in_memory_extracts(tmp_path, monkeypatch):
         payload = archive_path.read_bytes()
         step = 2048
         for idx in range(0, len(payload), step):
-            yield payload[idx: idx + step]
+            yield payload[idx : idx + step]
 
     asyncio.run(
         unzipper.unzip_stream(
@@ -597,15 +592,8 @@ def test_window_bits_cache_reuse(tmp_path, monkeypatch):
     asyncio.run(unzipper.unzip(str(archive_path), path=target))
     expected_files = _expected_files(archive_path)
     assert calls["count"] == len(expected_files)
-    cache_keys = {
-        key
-        for key in unzipper._WINDOW_BITS_CACHE
-        if key.startswith("zlib:")
-    }
-    assert cache_keys == {
-        f"zlib:{archive_path}:{name}"
-        for name in expected_files
-    }
+    cache_keys = {key for key in unzipper._WINDOW_BITS_CACHE if key.startswith("zlib:")}
+    assert cache_keys == {f"zlib:{archive_path}:{name}" for name in expected_files}
     extracted = _extracted_files(target)
     expected = _expected_files(archive_path)
     assert extracted == expected
@@ -707,6 +695,7 @@ def test_write_compressed_entry_fails_when_window_not_detected():
 
     def factory(_wbits=15, _zdict=None):
         return _BrokenDecomp()
+
     errors = (ZLIB_error,)
     with pytest.raises(ZLIB_error):
         unzipper._WINDOW_BITS_CACHE.clear()
@@ -780,18 +769,14 @@ def test_debug_alias_emits_deprecation_warning(tmp_path, monkeypatch):
 
     with pytest.warns(DeprecationWarning, match="__debug"):
         asyncio.run(
-            unzipper.unzip(
-                str(archive_path), path=tmp_path / "legacy", __debug=True
-            )
+            unzipper.unzip(str(archive_path), path=tmp_path / "legacy", __debug=True)
         )
 
     # The modern `debug=` keyword must not warn.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         asyncio.run(
-            unzipper.unzip(
-                str(archive_path), path=tmp_path / "modern", debug=True
-            )
+            unzipper.unzip(str(archive_path), path=tmp_path / "modern", debug=True)
         )
     assert not [w for w in caught if "__debug" in str(w.message)]
 
@@ -930,9 +915,7 @@ def test_uvloop_skipped_when_policy_already_set(monkeypatch):
     """A policy the host app already installed is left untouched."""
     captured = {}
     with monkeypatch.context() as ctx:
-        _uvloop_probe(
-            monkeypatch, ctx, captured, policy_sentinel=object()
-        )
+        _uvloop_probe(monkeypatch, ctx, captured, policy_sentinel=object())
         assert "policy" not in captured
     importlib.reload(unzipper)
 

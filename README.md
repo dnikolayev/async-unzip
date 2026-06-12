@@ -307,7 +307,11 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 ### 0.4.x
 - Initial async unzipper with concurrency, window-bits caching, and various bug fixes.
 
-# test
+## Checks
+
+The lint/check workflow includes [isort](https://pypi.org/project/isort/) for
+import ordering, alongside black, flake8, pylint, mypy, and pytest.
+
 ```bash
 pip install tox
 tox

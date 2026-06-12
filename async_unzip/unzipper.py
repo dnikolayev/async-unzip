@@ -126,9 +126,7 @@ def _enforce_limits(
     for entry in entries:
         size = entry.file_size
         if max_entry_size is not None and size > max_entry_size:
-            raise LimitExceeded(
-                "max_entry_size", max_entry_size, size, entry.filename
-            )
+            raise LimitExceeded("max_entry_size", max_entry_size, size, entry.filename)
         total += size
         if (
             max_total_uncompressed_size is not None
@@ -338,21 +336,15 @@ async def _read_local_header(src, file_name, debug=None):
     name_length = int.from_bytes(header[26:28], "little")
     extra_length = int.from_bytes(header[28:30], "little")
     if debug:
-        logger.debug(
-            "Done FILEPATH seek: %s - %s", LOCAL_FILE_HEADER_SIZE, header
-        )
+        logger.debug("Done FILEPATH seek: %s - %s", LOCAL_FILE_HEADER_SIZE, header)
     if name_length:
         filename_bytes = await src.read(name_length)
         if debug:
-            logger.debug(
-                "Done FILENAME seek: %s - %s", name_length, filename_bytes
-            )
+            logger.debug("Done FILENAME seek: %s - %s", name_length, filename_bytes)
     if extra_length:
         extra_bytes = await src.read(extra_length)
         if debug:
-            logger.debug(
-                "Done EXTRA seek: %s %s", extra_length, extra_bytes
-            )
+            logger.debug("Done EXTRA seek: %s %s", extra_length, extra_bytes)
 
 
 async def _write_stored_entry(
@@ -459,9 +451,7 @@ async def _write_compressed_entry(
     first_chunk_size = read_block if remaining > read_block else remaining
     buf = await src.read(first_chunk_size)
     if not buf:
-        raise BadZipFile(
-            f"Incomplete compressed entry for {file_name}"
-        )
+        raise BadZipFile(f"Incomplete compressed entry for {file_name}")
     remaining -= len(buf)
 
     window_bits = await _detect_window_bits(
@@ -489,8 +479,7 @@ async def _write_compressed_entry(
                 produced += len(chunk)
                 if expected_size is not None and produced > expected_size:
                     raise BadZipFile(
-                        "Decompressed size exceeds declared size for "
-                        f"{file_name}"
+                        "Decompressed size exceeds declared size for " f"{file_name}"
                     )
                 running_crc = _crc32(chunk, running_crc)
                 await out.write(chunk)
@@ -504,9 +493,7 @@ async def _write_compressed_entry(
         buf = await src.read(chunk_size)
         remaining -= len(buf)
         if not buf and remaining > 0:
-            raise BadZipFile(
-                f"Incomplete compressed entry for {file_name}"
-            )
+            raise BadZipFile(f"Incomplete compressed entry for {file_name}")
         if debug:
             logger.debug("Length: %s", len(buf))
 
@@ -514,9 +501,7 @@ async def _write_compressed_entry(
     if tail:
         produced += len(tail)
         if expected_size is not None and produced > expected_size:
-            raise BadZipFile(
-                f"Decompressed size exceeds declared size for {file_name}"
-            )
+            raise BadZipFile(f"Decompressed size exceeds declared size for {file_name}")
         running_crc = _crc32(tail, running_crc)
         await out.write(tail)
 
@@ -586,17 +571,13 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
             else:
                 await src.seek(in_file.header_offset)
             if debug:
-                logger.debug(
-                    "Done HEADER_OFFSET seek: %s", in_file.header_offset
-                )
+                logger.debug("Done HEADER_OFFSET seek: %s", in_file.header_offset)
 
             await _read_local_header(src, file_name, debug=debug)
 
             async with async_open(str(tmp_path), "wb+") as out:
                 remaining = in_file.compress_size
-                read_block = _select_buffer_size(
-                    in_file.file_size, user_buffer
-                )
+                read_block = _select_buffer_size(in_file.file_size, user_buffer)
                 if in_file.compress_type == ZIP_STORED:
                     await _write_stored_entry(
                         src,
@@ -790,8 +771,7 @@ async def unzip_stream(
 
     if chunk_iterable is None or not hasattr(chunk_iterable, "__aiter__"):
         raise TypeError(
-            "chunk_iterable must be an AsyncIterable yielding "
-            "bytes-like chunks"
+            "chunk_iterable must be an AsyncIterable yielding bytes-like chunks"
         )
 
     if async_open is None:
@@ -799,16 +779,12 @@ async def unzip_stream(
             "No async file backend available. Install aiofile or aiofiles."
         )
 
-    spool_parent = (
-        Path(spool_dir) if spool_dir else Path(tempfile.gettempdir())
-    )
+    spool_parent = Path(spool_dir) if spool_dir else Path(tempfile.gettempdir())
     spool_parent.mkdir(parents=True, exist_ok=True)
 
     def _check_archive_size(consumed):
         if max_archive_size is not None and consumed > max_archive_size:
-            raise LimitExceeded(
-                "max_archive_size", max_archive_size, consumed
-            )
+            raise LimitExceeded("max_archive_size", max_archive_size, consumed)
 
     async def _iter_chunks_to_buffer() -> io.BytesIO:
         buf = io.BytesIO()
@@ -931,9 +907,7 @@ async def unzip_stream(
             async with async_open(str(temp_path), "wb") as temp_file:
                 async for chunk in chunk_iterable:
                     if not isinstance(chunk, (bytes, bytearray, memoryview)):
-                        raise TypeError(
-                            "chunk_iterable must yield bytes-like objects"
-                        )
+                        raise TypeError("chunk_iterable must yield bytes-like objects")
                     if not chunk:
                         continue
                     consumed += len(chunk)

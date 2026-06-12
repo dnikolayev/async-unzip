@@ -89,9 +89,7 @@ class _AsyncOpen:
         self._fp = None
 
     async def __aenter__(self):
-        self._fp = open(  # pylint: disable=consider-using-with
-            self._path, self._mode
-        )
+        self._fp = open(self._path, self._mode)  # pylint: disable=consider-using-with
         return _AsyncFile(self._fp)
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -177,9 +175,7 @@ def test_unzip_stream_in_memory_is_deprecated(tmp_path, monkeypatch):
 
     with pytest.warns(DeprecationWarning, match="in_memory=True"):
         asyncio.run(
-            unzipper.unzip_stream(
-                chunks(), path=tmp_path / "out", in_memory=True
-            )
+            unzipper.unzip_stream(chunks(), path=tmp_path / "out", in_memory=True)
         )
     assert (tmp_path / "out" / "a.txt").read_bytes() == b"hi"
 
@@ -196,9 +192,7 @@ def test_unzip_stream_in_memory_rejects_traversal(tmp_path, monkeypatch):
 
     with pytest.raises(BadZipFile):
         asyncio.run(
-            unzipper.unzip_stream(
-                chunks(), path=tmp_path / "out", in_memory=True
-            )
+            unzipper.unzip_stream(chunks(), path=tmp_path / "out", in_memory=True)
         )
     assert not (tmp_path / "escape.txt").exists()
 
@@ -395,9 +389,7 @@ def test_unzip_terminates_on_oversized_compress_size(tmp_path, monkeypatch):
 
     target = tmp_path / "out"
     _run_with_timeout(
-        lambda: unzipper.unzip(
-            str(archive_path), path=target, buffer_size=64
-        ),
+        lambda: unzipper.unzip(str(archive_path), path=target, buffer_size=64),
         timeout=15,
     )
     assert (target / "victim.bin").read_bytes() == payload
@@ -530,9 +522,7 @@ def test_unzip_rejects_stored_crc_mismatch(tmp_path, monkeypatch):
     ("module", "method"),
     [("bz2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA)],
 )
-def test_unzip_rejects_unsupported_compression(
-    tmp_path, monkeypatch, module, method
-):
+def test_unzip_rejects_unsupported_compression(tmp_path, monkeypatch, module, method):
     # Only stored/deflate are supported; other methods must raise a clear
     # NotImplementedError on the default path (not an opaque zlib error), and
     # the in-memory path must reject them too rather than silently decode.
@@ -550,9 +540,7 @@ def test_unzip_rejects_unsupported_compression(
 
     with pytest.raises(NotImplementedError):
         asyncio.run(
-            unzipper.unzip_stream(
-                chunks(), path=tmp_path / "mem", in_memory=True
-            )
+            unzipper.unzip_stream(chunks(), path=tmp_path / "mem", in_memory=True)
         )
 
 

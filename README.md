@@ -249,6 +249,13 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 
 ## Changelog
 
+### 0.8.0
+- uvloop is no longer enabled as an unconditional import-time side effect. It still auto-installs its event-loop policy by default, but only when the host application hasn't already set a policy and hasn't set the `ASYNC_UNZIP_NO_UVLOOP` environment variable.
+- Debug output now goes through the `logging` module (`async_unzip.unzipper` logger at DEBUG level) instead of `print()`. The `__debug` parameter is renamed `debug`; `__debug` remains a deprecated keyword-only alias that emits a `DeprecationWarning`.
+- Stopped mutating the `DECOMPRESS_BACKEND`/`LAST_USED_BACKEND` module globals on every call (concurrent calls raced); the names remain as constants.
+- Packaging migrated to PEP 621 (`pyproject.toml`); `setup.py` removed. Added a `py.typed` marker and type hints on the public API, checked by `mypy` in CI. Added a coverage floor to CI.
+- `unzip_stream(in_memory=True)` removal is now scheduled for 1.0.0.
+
 ### 0.7.0
 - Add opt-in resource limits to `unzip`/`unzip_stream` (keyword-only, default unlimited): `max_entries`, `max_entry_size`, `max_total_uncompressed_size`, and `max_archive_size` (streams only). Breaches raise a new `LimitExceeded` exception — distinct from `BadZipFile` so policy refusals are distinguishable from corruption. Entry limits are enforced up front from the central directory (authoritative, because each entry is integrity-checked to produce exactly its declared size), so nothing is written before a breach is detected.
 - Expose `unzip`, `unzip_stream`, and `LimitExceeded` at the top level: `from async_unzip import unzip`.

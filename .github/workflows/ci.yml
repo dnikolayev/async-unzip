@@ -43,7 +43,9 @@ jobs:
       - name: Run tests (with accelerators when available)
         # Gating: whatever accelerators did install must pass. A real
         # isal/zlib-ng/uvloop regression fails CI here instead of hiding.
-        run: pytest -q
+        # Coverage is gated only on this run (the most backends are
+        # importable here, so it is the highest, most stable measurement).
+        run: pytest -q --cov=async_unzip --cov-fail-under=93
 
   lint:
     runs-on: ubuntu-latest

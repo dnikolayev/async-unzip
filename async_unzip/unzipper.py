@@ -900,10 +900,9 @@ async def unzip_stream(
     if in_memory:
         warnings.warn(
             "unzip_stream(in_memory=True) is deprecated and will be removed "
-            "in a future release: it buffers the whole archive in RAM, "
-            "decompresses synchronously, and ignores the backend/max_workers "
-            "options. Use the default spooled path (optionally with "
-            "spool_dir) instead.",
+            "in 1.0.0: it buffers the whole archive in RAM, decompresses "
+            "synchronously, and ignores the backend/max_workers options. Use "
+            "the default spooled path (optionally with spool_dir) instead.",
             DeprecationWarning,
             stacklevel=2,
         )

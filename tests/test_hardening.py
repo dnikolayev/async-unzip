@@ -351,7 +351,7 @@ def test_window_bits_cache_is_bounded(monkeypatch):
     monkeypatch.setattr(unzipper, "_WINDOW_BITS_CACHE_MAX", 8)
     unzipper._WINDOW_BITS_CACHE.clear()
 
-    async def fake_probe(buf, error_types, factory, __debug=None):
+    async def fake_probe(buf, error_types, factory, debug=None):
         return -zlib.MAX_WBITS
 
     monkeypatch.setattr(unzipper, "_probe_window_bits", fake_probe)

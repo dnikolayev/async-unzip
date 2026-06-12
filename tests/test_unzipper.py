@@ -7,8 +7,10 @@ import asyncio
 import builtins
 import gzip
 import importlib
+import logging
 import sys
 import types
+import warnings
 import zipfile
 import zlib
 from pathlib import Path
@@ -201,7 +203,7 @@ def test_unzipper_extracts_fixture_archives(
     use_debug,
     tmp_path,
     monkeypatch,
-    capsys,
+    caplog,
 ):
     _configure_async_reader(monkeypatch, reader)
     destination = tmp_path if use_cwd else tmp_path / Path(zip_name).stem
@@ -216,7 +218,8 @@ def test_unzipper_extracts_fixture_archives(
     if buffer_size is not None:
         kwargs["buffer_size"] = buffer_size
     if use_debug:
-        kwargs["__debug"] = True
+        kwargs["debug"] = True
+        caplog.set_level(logging.DEBUG, logger="async_unzip.unzipper")
     if spec.get("files"):
         kwargs["files"] = spec["files"]
     if spec.get("regex"):
@@ -230,8 +233,7 @@ def test_unzipper_extracts_fixture_archives(
     assert actual == expected
 
     if use_debug:
-        debug_output = capsys.readouterr().out
-        assert "Done HEADER_OFFSET seek" in debug_output
+        assert "Done HEADER_OFFSET seek" in caplog.text
 
 
 def test_unzipper_handles_entry_comments(tmp_path, monkeypatch):
@@ -244,7 +246,7 @@ def test_unzipper_handles_entry_comments(tmp_path, monkeypatch):
     _configure_async_reader(monkeypatch, "aiofiles")
     destination = tmp_path / "commented"
     asyncio.run(
-        unzipper.unzip(str(archive_path), path=destination, __debug=True)
+        unzipper.unzip(str(archive_path), path=destination, debug=True)
     )
     assert (destination / "annotated" / "data.txt").read_text() == "payload"
 
@@ -582,13 +584,13 @@ def test_window_bits_cache_reuse(tmp_path, monkeypatch):
 
     original_probe = unzipper._probe_window_bits
 
-    async def spy_probe(buf, error_types, factory, __debug=None):
+    async def spy_probe(buf, error_types, factory, debug=None):
         calls["count"] += 1
         return await original_probe(
             buf,
             error_types,
             factory,
-            __debug=__debug,
+            debug=debug,
         )
 
     monkeypatch.setattr(unzipper, "_probe_window_bits", spy_probe)
@@ -746,12 +748,13 @@ def test_write_compressed_entry_detects_truncated_stream():
         )
 
 
-def test_write_compressed_entry_logs_failed_window_bits(capsys):
+def test_write_compressed_entry_logs_failed_window_bits(caplog):
     payload = gzip.compress(b"payload")
     stream = _AsyncChunkStream([payload])
     recorder = _AsyncRecorder()
     unzipper._WINDOW_BITS_CACHE.clear()
     factory, errors = _zlib_backend_args()
+    caplog.set_level(logging.DEBUG, logger="async_unzip.unzipper")
     asyncio.run(
         unzipper._write_compressed_entry(
             stream,
@@ -762,11 +765,35 @@ def test_write_compressed_entry_logs_failed_window_bits(capsys):
             cache_key="test",
             error_types=errors,
             factory=factory,
-            __debug=True,
+            debug=True,
         )
     )
     assert b"payload" in b"".join(recorder.data)
-    assert "Failed WindowBits" in capsys.readouterr().out
+    assert "Failed WindowBits" in caplog.text
+
+
+def test_debug_alias_emits_deprecation_warning(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch, "aiofiles")
+    archive_path = tmp_path / "d.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("a.txt", b"hi")
+
+    with pytest.warns(DeprecationWarning, match="__debug"):
+        asyncio.run(
+            unzipper.unzip(
+                str(archive_path), path=tmp_path / "legacy", __debug=True
+            )
+        )
+
+    # The modern `debug=` keyword must not warn.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        asyncio.run(
+            unzipper.unzip(
+                str(archive_path), path=tmp_path / "modern", debug=True
+            )
+        )
+    assert not [w for w in caught if "__debug" in str(w.message)]
 
 
 def test_aiofile_backend_initialization(monkeypatch):

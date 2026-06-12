@@ -54,7 +54,7 @@ def _maybe_enable_uvloop():
         return
     try:
         with warnings.catch_warnings():
-            # set_event_loop_policy is deprecated on 3.12+; we still support it.
+            # set_event_loop_policy is deprecated on 3.12+; still supported.
             warnings.simplefilter("ignore", DeprecationWarning)
             asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     except (RuntimeError, ValueError):  # pragma: no cover - safety net
@@ -239,7 +239,9 @@ _register_zlibng_backend()
 _register_isal_backend()
 
 DEFAULT_BACKEND = "zlib"
-DECOMPRESS_BACKEND = DEFAULT_BACKEND  # last used backend
+# Module-level record of the default backend. Kept for backwards
+# compatibility; not mutated per call (that raced across concurrent calls).
+DECOMPRESS_BACKEND = DEFAULT_BACKEND
 AVAILABLE_BACKENDS = tuple(_AVAILABLE_BACKENDS.keys())
 
 try:
@@ -307,7 +309,20 @@ def _should_extract(file_name, whitelist, regex_patterns):
     return matches_whitelist and matches_regex
 
 
-async def _read_local_header(src, file_name, __debug=None):
+def _resolve_debug(debug, legacy):
+    """Resolve the debug flag, honoring the deprecated ``__debug`` alias."""
+    if legacy is not None:
+        warnings.warn(
+            "The '__debug' parameter is deprecated; use 'debug' instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        if debug is None:
+            return legacy
+    return debug
+
+
+async def _read_local_header(src, file_name, debug=None):
     """Read the local header and skip filename/extra blocks."""
     header = await src.read(LOCAL_FILE_HEADER_SIZE)
     if (
@@ -318,16 +333,22 @@ async def _read_local_header(src, file_name, __debug=None):
 
     name_length = int.from_bytes(header[26:28], "little")
     extra_length = int.from_bytes(header[28:30], "little")
-    if __debug:
-        print(f"Done FILEPATH seek: {LOCAL_FILE_HEADER_SIZE} - {header}")
+    if debug:
+        logger.debug(
+            "Done FILEPATH seek: %s - %s", LOCAL_FILE_HEADER_SIZE, header
+        )
     if name_length:
         filename_bytes = await src.read(name_length)
-        if __debug:
-            print(f"Done FILENAME seek: {name_length} - {filename_bytes}")
+        if debug:
+            logger.debug(
+                "Done FILENAME seek: %s - %s", name_length, filename_bytes
+            )
     if extra_length:
         extra_bytes = await src.read(extra_length)
-        if __debug:
-            print(f"Done EXTRA seek: {extra_length} {extra_bytes}")
+        if debug:
+            logger.debug(
+                "Done EXTRA seek: %s %s", extra_length, extra_bytes
+            )
 
 
 async def _write_stored_entry(
@@ -347,17 +368,17 @@ async def _write_stored_entry(
         raise BadZipFile(f"Bad CRC-32 for file {file_name!r}")
 
 
-async def _probe_window_bits(buf, error_types, factory, __debug=None):
+async def _probe_window_bits(buf, error_types, factory, debug=None):
     """Auto-detect window bits for compressed payloads."""
     for window_bits in (-MAX_WBITS, MAX_WBITS | 16, MAX_WBITS):
         try:
             factory(window_bits).decompress(buf)
-            if __debug:
-                print(f"Try WindowBits: {window_bits}")
+            if debug:
+                logger.debug("Try WindowBits: %s", window_bits)
             return window_bits
         except error_types:
-            if __debug:
-                print(f"Failed WindowBits: {window_bits}")
+            if debug:
+                logger.debug("Failed WindowBits: %s", window_bits)
             continue
     raise ZLIB_error("Unable to detect compression window size")
 
@@ -367,7 +388,7 @@ async def _detect_window_bits(
     error_types,
     factory,
     cache_key=None,
-    __debug=None,
+    debug=None,
 ):
     """Return cached window bits or probe and cache the result."""
     if cache_key:
@@ -379,7 +400,7 @@ async def _detect_window_bits(
         buf,
         error_types,
         factory,
-        __debug=__debug,
+        debug=debug,
     )
     if cache_key:
         if (
@@ -405,7 +426,7 @@ async def _write_compressed_entry(
     factory,
     expected_size=None,
     expected_crc=None,
-    __debug=None,
+    debug=None,
 ):
     """Decompress a deflated entry while streaming to disk.
 
@@ -444,11 +465,11 @@ async def _write_compressed_entry(
         error_types,
         factory,
         cache_key=cache_key,
-        __debug=__debug,
+        debug=debug,
     )
     decomp = factory(window_bits)
-    if __debug:
-        print(f"Incoming Length: {len(buf)}")
+    if debug:
+        logger.debug("Incoming Length: %s", len(buf))
 
     produced = 0
     running_crc = 0
@@ -482,8 +503,8 @@ async def _write_compressed_entry(
             raise BadZipFile(
                 f"Incomplete compressed entry for {file_name}"
             )
-        if __debug:
-            print(f"Length: {len(buf)}")
+        if debug:
+            logger.debug("Length: %s", len(buf))
 
     tail = decomp.flush()
     if tail:
@@ -517,13 +538,13 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
     cache_key,
     error_types,
     factory,
-    __debug,
+    debug,
 ):
     file_name = in_file.filename
     unpack_filename_path = _safe_destination(extra_path, file_name)
-    if __debug:
-        print(in_file)
-        print(unpack_filename_path)
+    if debug:
+        logger.debug("%s", in_file)
+        logger.debug("%s", unpack_filename_path)
 
     if in_file.is_dir():
         unpack_filename_path.mkdir(parents=True, exist_ok=True)
@@ -560,10 +581,12 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
                 src.seek(in_file.header_offset)
             else:
                 await src.seek(in_file.header_offset)
-            if __debug:
-                print(f"Done HEADER_OFFSET seek: {in_file.header_offset}")
+            if debug:
+                logger.debug(
+                    "Done HEADER_OFFSET seek: %s", in_file.header_offset
+                )
 
-            await _read_local_header(src, file_name, __debug=__debug)
+            await _read_local_header(src, file_name, debug=debug)
 
             async with async_open(str(tmp_path), "wb+") as out:
                 remaining = in_file.compress_size
@@ -591,7 +614,7 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
                         factory=factory,
                         expected_size=in_file.file_size,
                         expected_crc=in_file.CRC,
-                        __debug=__debug,
+                        debug=debug,
                     )
         os.replace(tmp_path, unpack_filename_path)
     except BaseException:
@@ -608,8 +631,9 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     buffer_size=None,
     max_workers=4,
     backend=None,
-    __debug=None,
+    debug=None,
     *,
+    __debug=None,
     max_entries=None,
     max_entry_size=None,
     max_total_uncompressed_size=None,
@@ -617,6 +641,8 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     """Extract entries from a ZIP archive using async I/O.
 
     Returns the list of paths written to disk (files and directory entries).
+    Set ``debug=True`` to emit verbose progress via ``logging`` (the
+    ``async_unzip.unzipper`` logger at DEBUG level).
 
     Optional resource limits (keyword-only, ``None`` means unlimited) are
     checked against the central directory before extraction and raise
@@ -625,7 +651,12 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     - ``max_entries``: maximum number of selected members (files and dirs).
     - ``max_entry_size``: maximum uncompressed size of any single entry.
     - ``max_total_uncompressed_size``: maximum total uncompressed size.
+
+    .. deprecated::
+        ``__debug`` is a deprecated alias for ``debug`` and will be removed in
+        a future release.
     """
+    debug = _resolve_debug(debug, __debug)
     user_buffer = buffer_size
     file_whitelist = set(files) if files else None
     regex_patterns = _compile_patterns(regex_files)
@@ -636,8 +667,6 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
         )
 
     backend_name, decompress_factory, error_types = _resolve_backend(backend)
-    globals()["DECOMPRESS_BACKEND"] = backend_name
-    globals()["LAST_USED_BACKEND"] = backend_name
 
     files_info = await asyncio.to_thread(_read_infolist, zip_file)
     extra_path = "" if path is None else PurePath(path)
@@ -681,7 +710,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
                     entry_cache,
                     error_types,
                     decompress_factory,
-                    __debug,
+                    debug,
                 )
             )
         return [item for item in written if item is not None]
@@ -698,7 +727,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
                 entry_cache,
                 error_types,
                 decompress_factory,
-                __debug,
+                debug,
             )
 
     results = await asyncio.gather(
@@ -721,8 +750,9 @@ async def unzip_stream(
     backend=None,
     spool_dir=None,
     in_memory: bool = False,
-    __debug=None,
+    debug=None,
     *,
+    __debug=None,
     max_entries=None,
     max_entry_size=None,
     max_total_uncompressed_size=None,
@@ -742,13 +772,17 @@ async def unzip_stream(
     download is fully read.
 
     .. deprecated::
-        ``in_memory=True`` is deprecated and will be removed in a future
-        release. It buffers the whole archive in RAM, decompresses each entry
+        ``in_memory=True`` is deprecated and will be removed in 1.0.0. It
+        buffers the whole archive in RAM, decompresses each entry
         synchronously via the stdlib ``zipfile`` reader (blocking the event
         loop), and ignores ``backend`` and ``max_workers``. Use the default
         spooled path instead; point ``spool_dir`` at any writable location to
         control where the temporary archive is stored.
+
+        ``__debug`` is a deprecated alias for ``debug`` and will be removed in
+        a future release.
     """
+    debug = _resolve_debug(debug, __debug)
 
     if chunk_iterable is None or not hasattr(chunk_iterable, "__aiter__"):
         raise TypeError(
@@ -917,7 +951,7 @@ async def unzip_stream(
             max_entries=max_entries,
             max_entry_size=max_entry_size,
             max_total_uncompressed_size=max_total_uncompressed_size,
-            __debug=__debug,
+            debug=debug,
         )
     finally:
         if temp_path is not None:

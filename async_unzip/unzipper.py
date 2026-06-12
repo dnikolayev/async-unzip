@@ -9,7 +9,7 @@ import re
 import tempfile
 import warnings
 from pathlib import Path, PurePath
-from typing import AsyncIterable, Iterable, List, Optional
+from typing import AsyncIterable, Dict, Iterable, List, Optional, Set
 from zipfile import (
     ZIP_DEFLATED,
     ZIP_STORED,
@@ -66,7 +66,7 @@ _maybe_enable_uvloop()
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
 
 
-def _select_buffer_size(entry_size, user_buffer):
+def _select_buffer_size(entry_size: int, user_buffer) -> int:
     if user_buffer:
         size = int(user_buffer)
         return size if size > 0 else DEFAULT_READ_BUFFER_SIZE
@@ -79,7 +79,7 @@ def _select_buffer_size(entry_size, user_buffer):
 
 LOCAL_FILE_HEADER_SIZE = 30
 LOCAL_FILE_HEADER_SIGNATURE = b"PK\x03\x04"
-_WINDOW_BITS_CACHE = {}
+_WINDOW_BITS_CACHE: Dict[str, int] = {}
 # Cap the process-global window-bits cache so long-running services that
 # extract many distinct archives do not grow it without bound.
 _WINDOW_BITS_CACHE_MAX = 1024
@@ -96,7 +96,7 @@ class LimitExceeded(Exception):
     :class:`zipfile.BadZipFile`), so callers can tell the two apart.
     """
 
-    def __init__(self, limit, configured, observed, entry=None):
+    def __init__(self, limit, configured, observed, entry=None) -> None:
         self.limit = limit
         self.configured = configured
         self.observed = observed
@@ -112,7 +112,7 @@ def _enforce_limits(
     max_entries=None,
     max_entry_size=None,
     max_total_uncompressed_size=None,
-):
+) -> None:
     """Reject an entry set that breaches the configured size/count limits.
 
     Enforced from the central directory before any extraction. Because each
@@ -141,7 +141,7 @@ def _enforce_limits(
             )
 
 
-def _safe_destination(root, file_name):
+def _safe_destination(root, file_name: str) -> Path:
     """Resolve *file_name* under *root*, rejecting path traversal.
 
     Guards against "Zip Slip": entries whose names contain ``..`` segments
@@ -186,13 +186,13 @@ try:  # pragma: no cover - optional dependency
     from isal import isal_zlib as _isal_zlib
     from isal.isal_zlib import IsalError as _IsalError
 except ImportError:  # pragma: no cover
-    _isal_zlib = None
-    _IsalError = None
+    _isal_zlib = None  # type: ignore[assignment]
+    _IsalError = None  # type: ignore[assignment,misc]
 
 try:  # pragma: no cover - optional dependency
     from zlib_ng import zlib_ng as _zlibng_module
 except ImportError:  # pragma: no cover
-    _zlibng_module = None
+    _zlibng_module = None  # type: ignore[assignment]
     _ZLIBNG_ERROR = None
 else:  # pragma: no cover
     _ZLIBNG_ERROR = getattr(_zlibng_module, "error", None)
@@ -245,21 +245,25 @@ DECOMPRESS_BACKEND = DEFAULT_BACKEND
 AVAILABLE_BACKENDS = tuple(_AVAILABLE_BACKENDS.keys())
 
 try:
-    from aiofile import async_open as _AIOFILE_OPEN
+    from aiofile import (  # type: ignore[import-untyped]  # noqa: E501
+        async_open as _AIOFILE_OPEN,
+    )
 except ModuleNotFoundError:  # pragma: no cover - platform specific
-    _AIOFILE_OPEN = None
+    _AIOFILE_OPEN = None  # type: ignore[assignment]
 
 try:
-    from aiofiles import open as _AIOFILES_OPEN
+    from aiofiles import (  # type: ignore[import-untyped]  # noqa: E501
+        open as _AIOFILES_OPEN,
+    )
 except (ModuleNotFoundError, ImportError):  # pragma: no cover
-    _AIOFILES_OPEN = None
+    _AIOFILES_OPEN = None  # type: ignore[assignment]
 
 MISSED_MODULES = int(_AIOFILE_OPEN is None) + int(_AIOFILES_OPEN is None)
 
-if _AIOFILES_OPEN:
+if _AIOFILES_OPEN is not None:
     ASYNC_READER = "aiofiles"
     ASYNC_OPEN = _AIOFILES_OPEN
-elif _AIOFILE_OPEN:
+elif _AIOFILE_OPEN is not None:
     ASYNC_READER = "aiofile"
     ASYNC_OPEN = _AIOFILE_OPEN
 else:
@@ -300,7 +304,7 @@ def _compile_patterns(regex_files: Optional[Iterable[str]]):
     return [re.compile(pattern) for pattern in regex_list]
 
 
-def _should_extract(file_name, whitelist, regex_patterns):
+def _should_extract(file_name, whitelist, regex_patterns) -> bool:
     """Return True when the entry should be extracted."""
     matches_whitelist = not whitelist or file_name in whitelist
     matches_regex = not regex_patterns or any(
@@ -637,7 +641,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     max_entries=None,
     max_entry_size=None,
     max_total_uncompressed_size=None,
-):
+) -> List[Path]:
     """Extract entries from a ZIP archive using async I/O.
 
     Returns the list of paths written to disk (files and directory entries).
@@ -688,7 +692,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     )
 
     worker_count = max(1, int(max_workers) if max_workers else 1)
-    created_dirs = set()
+    created_dirs: Set[str] = set()
     cache_key_base = f"{backend_name}:{zip_file}"
     try:
         asyncio.get_running_loop()
@@ -757,7 +761,7 @@ async def unzip_stream(
     max_entry_size=None,
     max_total_uncompressed_size=None,
     max_archive_size=None,
-):
+) -> List[Path]:
     """Extract a ZIP archive provided as an async stream of chunks.
 
     The incoming chunks are spooled to a temporary file (optionally inside
@@ -937,7 +941,7 @@ async def unzip_stream(
                     _check_archive_size(consumed)
                     await temp_file.write(bytes(chunk))
         finally:
-            if cleanup_handle:
+            if cleanup_handle is not None:
                 atexit.unregister(cleanup_handle)
 
         return await unzip(

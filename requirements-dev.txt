@@ -3,6 +3,7 @@ pytest-cov
 flake8
 pylint
 isort
+mypy
 # Async I/O backends exercised by the test suite (at least one required).
 aiofiles
 aiofile

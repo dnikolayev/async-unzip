@@ -859,33 +859,54 @@ def test_unicode_filenames(tmp_path, monkeypatch):
     assert extracted["файл/données.txt"] == len("unicode content")
 
 
-def test_uvloop_policy_applied(monkeypatch):
-    """Ensure uvloop is hooked when available."""
+def _uvloop_probe(monkeypatch, ctx, captured, *, policy_sentinel=None):
+    """Reload unzipper with a dummy uvloop and capture policy installs."""
     dummy_uvloop = types.ModuleType("uvloop")
 
     class _DummyPolicy:
         pass
 
     dummy_policy = _DummyPolicy()
-
-    def policy_factory():
-        return dummy_policy
-
-    dummy_uvloop.EventLoopPolicy = policy_factory
-    captured = {}
+    dummy_uvloop.EventLoopPolicy = lambda: dummy_policy
 
     def fake_set_event_loop_policy(policy):
         captured["policy"] = policy
 
+    ctx.setitem(sys.modules, "uvloop", dummy_uvloop)
+    ctx.setattr(asyncio, "set_event_loop_policy", fake_set_event_loop_policy)
+    # Control the "already installed" precondition the guard checks.
+    ctx.setattr(asyncio.events, "_event_loop_policy", policy_sentinel)
+    importlib.reload(unzipper)
+    return dummy_policy
+
+
+def test_uvloop_policy_applied(monkeypatch):
+    """uvloop is hooked when available and no policy is set."""
+    captured = {}
     with monkeypatch.context() as ctx:
-        ctx.setitem(sys.modules, "uvloop", dummy_uvloop)
-        ctx.setattr(
-            asyncio,
-            "set_event_loop_policy",
-            fake_set_event_loop_policy,
-        )
-        importlib.reload(unzipper)
+        dummy_policy = _uvloop_probe(monkeypatch, ctx, captured)
         assert captured["policy"] is dummy_policy
+    importlib.reload(unzipper)
+
+
+def test_uvloop_skipped_when_opted_out(monkeypatch):
+    """ASYNC_UNZIP_NO_UVLOOP disables the automatic policy install."""
+    captured = {}
+    with monkeypatch.context() as ctx:
+        ctx.setenv("ASYNC_UNZIP_NO_UVLOOP", "1")
+        _uvloop_probe(monkeypatch, ctx, captured)
+        assert "policy" not in captured
+    importlib.reload(unzipper)
+
+
+def test_uvloop_skipped_when_policy_already_set(monkeypatch):
+    """A policy the host app already installed is left untouched."""
+    captured = {}
+    with monkeypatch.context() as ctx:
+        _uvloop_probe(
+            monkeypatch, ctx, captured, policy_sentinel=object()
+        )
+        assert "policy" not in captured
     importlib.reload(unzipper)
 
 

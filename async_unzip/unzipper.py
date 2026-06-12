@@ -3,17 +3,20 @@
 import asyncio
 import atexit
 import io
+import logging
 import os
 import re
 import tempfile
 from pathlib import Path, PurePath
-from typing import AsyncIterable, Iterable, Optional
+from typing import AsyncIterable, Iterable, List, Optional
 from zipfile import ZIP_STORED, BadZipFile, ZipFile, is_zipfile
 from zlib import (
     MAX_WBITS,
     decompressobj as _zlib_decompressobj,
     error as ZLIB_error,
 )
+
+logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - optional dependency
     import uvloop
@@ -42,6 +45,47 @@ def _select_buffer_size(entry_size, user_buffer):
 LOCAL_FILE_HEADER_SIZE = 30
 LOCAL_FILE_HEADER_SIGNATURE = b"PK\x03\x04"
 _WINDOW_BITS_CACHE = {}
+# Cap the process-global window-bits cache so long-running services that
+# extract many distinct archives do not grow it without bound.
+_WINDOW_BITS_CACHE_MAX = 1024
+# Bit 0 of the general purpose flag marks an entry as encrypted.
+_ENCRYPTED_FLAG = 0x1
+
+
+def _safe_destination(root, file_name):
+    """Resolve *file_name* under *root*, rejecting path traversal.
+
+    Guards against "Zip Slip": entries whose names contain ``..`` segments
+    or absolute paths that would otherwise let a malicious archive write
+    outside the extraction directory.
+    """
+    root_resolved = Path(root).resolve()
+    candidate = (root_resolved / file_name).resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise BadZipFile(
+            f"Unsafe entry name escapes extraction directory: {file_name!r}"
+        )
+    return candidate
+
+
+def _ensure_supported(in_file):
+    """Reject archive entries we cannot extract correctly."""
+    if in_file.flag_bits & _ENCRYPTED_FLAG:
+        raise NotImplementedError(
+            f"Encrypted entries are not supported: {in_file.filename!r}"
+        )
+
+
+def _read_infolist(zip_file):
+    """Validate the archive and read its central directory.
+
+    Runs synchronously; callers offload it to a worker thread so the event
+    loop is not blocked while the central directory is parsed.
+    """
+    if not is_zipfile(zip_file):
+        raise BadZipFile
+    with ZipFile(zip_file) as archive:
+        return list(archive.infolist())
 
 
 try:  # pragma: no cover - optional dependency
@@ -125,13 +169,9 @@ elif _AIOFILE_OPEN:
 else:
     ASYNC_READER = "aiofile"
     ASYNC_OPEN = None
-    print(  # pragma: no cover - mirrors legacy behaviour
-        "Not aiofile nor aiofiles is present! Going to crash..\n"
-        "    please do:\n"
-        "        pip install aiofile\n"
-        "    or\n"
-        "        pip install aiofiles\n"
-        "    to make the code working, Thanks!"
+    logger.warning(  # pragma: no cover - mirrors legacy behaviour
+        "Neither aiofile nor aiofiles is installed; async I/O is unavailable. "
+        "Install one with `pip install aiofile` or `pip install aiofiles`."
     )
 
 # Backwards compatibility for external imports.
@@ -242,6 +282,12 @@ async def _detect_window_bits(
         __debug=__debug,
     )
     if cache_key:
+        if (
+            len(_WINDOW_BITS_CACHE) >= _WINDOW_BITS_CACHE_MAX
+            and cache_key not in _WINDOW_BITS_CACHE
+        ):
+            # Evict the oldest entry (dicts preserve insertion order).
+            _WINDOW_BITS_CACHE.pop(next(iter(_WINDOW_BITS_CACHE)))
         _WINDOW_BITS_CACHE[cache_key] = window_bits
     return window_bits
 
@@ -257,9 +303,18 @@ async def _write_compressed_entry(
     cache_key,
     error_types,
     factory,
+    expected_size=None,
     __debug=None,
 ):
-    """Decompress a deflated entry while streaming to disk."""
+    """Decompress a deflated entry while streaming to disk.
+
+    Output is flushed in ``read_block`` slices to cap peak memory (honoured
+    by the ``zlib`` and ``zlib-ng`` backends; ``python-isal`` ignores the
+    bound and returns each block in one piece). When the declared
+    uncompressed ``expected_size`` is known, the running total is checked so a
+    crafted or corrupt archive cannot inflate past it (a zip-bomb guard that
+    works across every backend).
+    """
     if remaining == 0:
         await out.write(b"")
         return
@@ -283,8 +338,24 @@ async def _write_compressed_entry(
     if __debug:
         print(f"Incoming Length: {len(buf)}")
 
+    produced = 0
+
+    async def _drain(data):
+        nonlocal produced
+        while data:
+            chunk = decomp.decompress(data, read_block)
+            if chunk:
+                produced += len(chunk)
+                if expected_size is not None and produced > expected_size:
+                    raise BadZipFile(
+                        "Decompressed size exceeds declared size for "
+                        f"{file_name}"
+                    )
+                await out.write(chunk)
+            data = decomp.unconsumed_tail
+
     while buf:
-        await out.write(decomp.decompress(buf))
+        await _drain(buf)
         if remaining <= 0:
             break
         chunk_size = read_block if remaining > read_block else remaining
@@ -297,7 +368,14 @@ async def _write_compressed_entry(
         if __debug:
             print(f"Length: {len(buf)}")
 
-    await out.write(decomp.flush())
+    tail = decomp.flush()
+    if tail:
+        produced += len(tail)
+        if expected_size is not None and produced > expected_size:
+            raise BadZipFile(
+                f"Decompressed size exceeds declared size for {file_name}"
+            )
+        await out.write(tail)
 
 
 async def _extract_entry(  # pylint: disable=too-many-arguments
@@ -312,14 +390,16 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
     __debug,
 ):
     file_name = in_file.filename
-    unpack_filename_path = Path(extra_path) / file_name
+    unpack_filename_path = _safe_destination(extra_path, file_name)
     if __debug:
         print(in_file)
         print(unpack_filename_path)
 
     if in_file.is_dir():
         unpack_filename_path.mkdir(parents=True, exist_ok=True)
-        return
+        return unpack_filename_path
+
+    _ensure_supported(in_file)
 
     parent_key = str(unpack_filename_path.parent)
     if parent_key not in created_dirs:
@@ -357,8 +437,10 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
                     cache_key=cache_key,
                     error_types=error_types,
                     factory=factory,
+                    expected_size=in_file.file_size or None,
                     __debug=__debug,
                 )
+    return unpack_filename_path
 
 
 async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
@@ -371,13 +453,13 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     backend=None,
     __debug=None,
 ):
-    """Extract entries from a ZIP archive using async I/O."""
+    """Extract entries from a ZIP archive using async I/O.
+
+    Returns the list of paths written to disk (files and directory entries).
+    """
     user_buffer = buffer_size
     file_whitelist = set(files) if files else None
     regex_patterns = _compile_patterns(regex_files)
-
-    if not is_zipfile(zip_file):
-        raise BadZipFile
 
     if async_open is None:
         raise RuntimeError(
@@ -388,8 +470,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     globals()["DECOMPRESS_BACKEND"] = backend_name
     globals()["LAST_USED_BACKEND"] = backend_name
 
-    with ZipFile(zip_file) as archive:
-        files_info = list(archive.infolist())
+    files_info = await asyncio.to_thread(_read_infolist, zip_file)
     extra_path = "" if path is None else PurePath(path)
 
     selected_entries = [
@@ -399,7 +480,7 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     ]
 
     if not selected_entries:
-        return
+        return []
 
     worker_count = max(1, int(max_workers) if max_workers else 1)
     created_dirs = set()
@@ -411,25 +492,28 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
         semaphore = None
 
     if semaphore is None or worker_count == 1 or len(selected_entries) == 1:
+        written = []
         for entry in selected_entries:
             entry_cache = f"{cache_key_base}:{entry.filename}"
-            await _extract_entry(
-                zip_file,
-                entry,
-                extra_path,
-                user_buffer,
-                created_dirs,
-                entry_cache,
-                error_types,
-                decompress_factory,
-                __debug,
+            written.append(
+                await _extract_entry(
+                    zip_file,
+                    entry,
+                    extra_path,
+                    user_buffer,
+                    created_dirs,
+                    entry_cache,
+                    error_types,
+                    decompress_factory,
+                    __debug,
+                )
             )
-        return
+        return [item for item in written if item is not None]
 
     async def _bounded_extract(entry):
         async with semaphore:
             entry_cache = f"{cache_key_base}:{entry.filename}"
-            await _extract_entry(
+            return await _extract_entry(
                 zip_file,
                 entry,
                 extra_path,
@@ -441,9 +525,10 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
                 __debug,
             )
 
-    await asyncio.gather(
+    results = await asyncio.gather(
         *(_bounded_extract(entry) for entry in selected_entries)
     )
+    return [item for item in results if item is not None]
 
 
 # pylint: disable=too-many-locals
@@ -466,13 +551,23 @@ async def unzip_stream(
 
     The incoming chunks are spooled to a temporary file (optionally inside
     ``spool_dir``) and then processed via :func:`unzip`. Supply the same
-    filtering arguments as :func:`unzip` to limit extracted entries.
+    filtering arguments as :func:`unzip` to limit extracted entries. Returns
+    the list of paths written to disk.
+
+    Note: ``in_memory=True`` buffers the whole archive in RAM and decompresses
+    each entry synchronously via the stdlib ``zipfile`` reader, so ``backend``
+    and ``max_workers`` only apply to the default (spooled) path.
     """
 
     if chunk_iterable is None or not hasattr(chunk_iterable, "__aiter__"):
         raise TypeError(
             "chunk_iterable must be an AsyncIterable yielding "
             "bytes-like chunks"
+        )
+
+    if async_open is None:
+        raise RuntimeError(
+            "No async file backend available. Install aiofile or aiofiles."
         )
 
     spool_parent = (
@@ -491,10 +586,11 @@ async def unzip_stream(
         buf.seek(0)
         return buf
 
-    async def _extract_from_buffer(buf: io.BytesIO) -> None:
+    async def _extract_from_buffer(buf: io.BytesIO) -> List[Path]:
         file_whitelist = set(files) if files else None
         regex_patterns = _compile_patterns(regex_files)
         extra_path = "" if path is None else PurePath(path)
+        written: List[Path] = []
 
         with ZipFile(buf) as archive:
             selected_entries = [
@@ -508,17 +604,19 @@ async def unzip_stream(
             ]
 
             if not selected_entries:
-                return
+                return written
 
-            created_dirs: set[str] = set()
+            created_dirs: set = set()
             for entry in selected_entries:
                 file_name = entry.filename
-                unpack_path = PurePath(file_name)
-                unpack_filename_path = Path(extra_path, unpack_path)
+                unpack_filename_path = _safe_destination(extra_path, file_name)
 
                 if entry.is_dir():
                     unpack_filename_path.mkdir(parents=True, exist_ok=True)
+                    written.append(unpack_filename_path)
                     continue
+
+                _ensure_supported(entry)
 
                 parent_key = str(unpack_filename_path.parent)
                 if parent_key not in created_dirs:
@@ -539,11 +637,12 @@ async def unzip_stream(
                             if not chunk:
                                 break
                             await out.write(chunk)
+                written.append(unpack_filename_path)
+        return written
 
     if in_memory:
         buffer = await _iter_chunks_to_buffer()
-        await _extract_from_buffer(buffer)
-        return
+        return await _extract_from_buffer(buffer)
 
     cleanup_handle = None
     temp_path: Optional[Path] = None
@@ -563,7 +662,7 @@ async def unzip_stream(
         atexit.register(cleanup_handle)
 
         try:
-            with temp_path.open("wb") as temp_file:
+            async with async_open(str(temp_path), "wb") as temp_file:
                 async for chunk in chunk_iterable:
                     if not isinstance(chunk, (bytes, bytearray, memoryview)):
                         raise TypeError(
@@ -571,13 +670,12 @@ async def unzip_stream(
                         )
                     if not chunk:
                         continue
-                    temp_file.write(bytes(chunk))
-                temp_file.flush()
+                    await temp_file.write(bytes(chunk))
         finally:
             if cleanup_handle:
                 atexit.unregister(cleanup_handle)
 
-        await unzip(
+        return await unzip(
             str(temp_path),
             path=path,
             files=files,

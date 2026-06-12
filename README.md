@@ -13,8 +13,25 @@ if a deflate stream is truncated, inflates past the uncompressed size declared
 in its header, or fails its CRC-32 — so corrupt or size-/CRC-spoofed entries
 are caught rather than written. (These are consistency checks against the
 archive's own metadata; they do not cap an entry whose header honestly
-declares a huge size. Configurable size/entry-count limits are planned.)
-`unzip` and `unzip_stream` return the list of paths written to disk.
+declares a huge size — for that, set the resource limits below.) `unzip` and
+`unzip_stream` return the list of paths written to disk.
+
+For honestly-declared oversized archives, opt into resource limits
+(`max_entries`, `max_entry_size`, `max_total_uncompressed_size`, and
+`max_archive_size` for streams). They are checked up front and raise
+`LimitExceeded` before extraction begins:
+
+```python
+from async_unzip import unzip, LimitExceeded
+
+asyncio.run(unzip(
+    "untrusted.zip",
+    path="output",
+    max_entries=10_000,
+    max_entry_size=500 * 1024 * 1024,
+    max_total_uncompressed_size=2 * 1024 * 1024 * 1024,
+))
+```
 
 By default the extractor schedules up to 4 concurrent workers using the stdlib `zlib` backend. Tune concurrency via the `max_workers` argument, and install `python-isal` or `zlib-ng` if you want to force those accelerators via the optional `backend` parameter:
 
@@ -65,11 +82,15 @@ asyncio.run(
 - `buffer_size`: override block size for reading each entry; defaults to auto.
 - `max_workers`: maximum concurrent extraction coroutines (minimum 1).
 - `backend`: decompressor choice (`zlib`, `python-isal`, `zlib-ng`).
+- `max_entries` (keyword-only): maximum number of selected members; `None` = unlimited.
+- `max_entry_size` (keyword-only): maximum uncompressed size of any single entry.
+- `max_total_uncompressed_size` (keyword-only): maximum total uncompressed size.
 - `__debug`: when truthy, prints internal seek/decompression events.
 
 Returns a list of `pathlib.Path` objects for the entries written to disk.
-Entries whose names escape `path` raise `BadZipFile`, and encrypted entries
-raise `NotImplementedError`.
+Entries whose names escape `path` raise `BadZipFile`, encrypted entries raise
+`NotImplementedError`, and a breached limit raises `LimitExceeded` (a distinct
+exception, not a `BadZipFile`) before any file is written.
 
 ### Streaming downloads
 
@@ -144,6 +165,8 @@ async def download_and_extract_httpx_mem(url, target_dir):
 - `backend`: decompressor name (`zlib`, `python-isal`, `zlib-ng`).
 - `spool_dir`: optional directory for temporary storage (defaults to system temp).
 - `in_memory`: when True, downloads into RAM and extracts without touching disk.
+- `max_entries` / `max_entry_size` / `max_total_uncompressed_size` (keyword-only): same as `unzip`.
+- `max_archive_size` (keyword-only): cap on raw bytes read from the stream; raises `LimitExceeded` before an oversized download is fully consumed.
 - `__debug`: enables verbose progress logging just like `unzip`.
 
 Returns the list of paths written to disk. Note that `in_memory=True`
@@ -225,6 +248,11 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 ```
 
 ## Changelog
+
+### 0.7.0
+- Add opt-in resource limits to `unzip`/`unzip_stream` (keyword-only, default unlimited): `max_entries`, `max_entry_size`, `max_total_uncompressed_size`, and `max_archive_size` (streams only). Breaches raise a new `LimitExceeded` exception — distinct from `BadZipFile` so policy refusals are distinguishable from corruption. Entry limits are enforced up front from the central directory (authoritative, because each entry is integrity-checked to produce exactly its declared size), so nothing is written before a breach is detected.
+- Expose `unzip`, `unzip_stream`, and `LimitExceeded` at the top level: `from async_unzip import unzip`.
+- Reject unsupported compression methods consistently: entries that are neither stored nor deflate (e.g. bzip2, lzma) now raise `NotImplementedError` on both the spooled and in-memory paths, instead of leaking an opaque zlib error (spooled) or silently decoding only in memory.
 
 ### 0.6.1
 - Security: fix an infinite-loop denial of service in the deflate reader. A crafted archive declaring a `compress_size` larger than its real stream made decompression spin forever (and grow memory); the reader now stops at the deflate end-of-stream marker.

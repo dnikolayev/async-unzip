@@ -8,6 +8,7 @@ decompression with a declared-size guard, and the extracted-path return value.
 # pylint: disable=protected-access,missing-function-docstring
 
 import asyncio
+import threading
 import zipfile
 import zlib
 from pathlib import Path
@@ -16,6 +17,40 @@ from zipfile import BadZipFile
 import pytest
 
 from async_unzip import unzipper
+
+
+def _run_with_timeout(coro_factory, timeout=15):
+    """Run an async call in a daemon thread, failing if it never returns.
+
+    The infinite-loop regression is a tight synchronous spin (no await on the
+    empty-chunk path), so asyncio's own timeout cannot interrupt it; a watchdog
+    thread lets the test fail cleanly instead of hanging the whole suite.
+    """
+    box = {}
+
+    def runner():
+        try:
+            box["value"] = asyncio.run(coro_factory())
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise AssertionError(
+            "extraction did not terminate within "
+            f"{timeout}s (possible infinite loop)"
+        )
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def _infolist(archive_path):
+    with zipfile.ZipFile(archive_path) as archive:
+        return archive.infolist()
+
 
 BACKENDS = ["zlib"]
 try:  # optional accelerators, exercised when installed
@@ -314,3 +349,173 @@ def test_window_bits_cache_is_bounded(monkeypatch):
 
     asyncio.run(drive())
     assert len(unzipper._WINDOW_BITS_CACHE) <= 8
+
+
+# --------------------------------------------------------------------------
+# Integrity validation (size, CRC, eof) and the lying-compress_size DoS
+# --------------------------------------------------------------------------
+
+
+def test_unzip_terminates_on_oversized_compress_size(tmp_path, monkeypatch):
+    # A crafted central directory that declares more compressed bytes than the
+    # real deflate stream used to spin _drain forever once the output was
+    # capped per block (small buffer) and a surplus chunk was fed in. The fix
+    # stops at the deflate end-of-stream marker, so extraction must terminate
+    # and still produce the correct bytes. A small buffer_size plus a second
+    # entry (providing real trailing bytes) reproduces the original hang.
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "lie.zip"
+    payload = b"A" * 2_000_000
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("victim.bin", payload)
+        archive.writestr("filler.bin", b"B" * 500_000)
+
+    infos = _infolist(archive_path)
+    victim = [i for i in infos if i.filename == "victim.bin"]
+    victim[0].compress_size += 200_000  # lie: declare a large surplus
+    monkeypatch.setattr(unzipper, "_read_infolist", lambda _zf: victim)
+
+    target = tmp_path / "out"
+    _run_with_timeout(
+        lambda: unzipper.unzip(
+            str(archive_path), path=target, buffer_size=64
+        ),
+        timeout=15,
+    )
+    assert (target / "victim.bin").read_bytes() == payload
+
+
+def test_write_compressed_entry_accepts_sync_flush_stream():
+    # A deflate stream terminated with Z_SYNC_FLUSH (no final block) decodes
+    # fully but never sets decomp.eof. stdlib accepts it when size and CRC
+    # agree, so we must too instead of crying "truncated".
+    payload = b"sync-flush payload " * 200
+    compressor = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+    data = compressor.compress(payload) + compressor.flush(zlib.Z_SYNC_FLUSH)
+    stream = _AsyncChunkStream([data])
+    out = _AsyncRecorder()
+    unzipper._WINDOW_BITS_CACHE.clear()
+    asyncio.run(
+        unzipper._write_compressed_entry(
+            stream,
+            out,
+            remaining=len(data),
+            read_block=64,  # force per-block capping so eof never trips early
+            file_name="sf",
+            cache_key=None,
+            error_types=(zlib.error,),
+            factory=zlib.decompressobj,
+            expected_size=len(payload),
+            expected_crc=zlib.crc32(payload),
+        )
+    )
+    assert bytes(out.data) == payload
+
+
+def test_failed_crc_leaves_no_file_at_destination(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "crc.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("a.txt", b"the original content")
+
+    infos = _infolist(archive_path)
+    infos[0].CRC ^= 0xFFFFFFFF
+    monkeypatch.setattr(unzipper, "_read_infolist", lambda _zf: infos)
+
+    target = tmp_path / "out"
+    with pytest.raises(BadZipFile):
+        asyncio.run(unzipper.unzip(str(archive_path), path=target))
+
+    # No corrupt file and no leftover .part temp at the destination.
+    assert not (target / "a.txt").exists()
+    assert list(target.glob("*.part")) == []
+    assert list(target.glob("a.txt*")) == []
+
+
+def test_unzip_rejects_zero_declared_size_inflation(tmp_path, monkeypatch):
+    # A deflated entry that declares file_size=0 but inflates to real bytes
+    # must be rejected (the `or None` hole used to disable the guard).
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "amp.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("big.bin", b"x" * 100_000)
+
+    infos = _infolist(archive_path)
+    infos[0].file_size = 0  # lie: claim empty
+    monkeypatch.setattr(unzipper, "_read_infolist", lambda _zf: infos)
+
+    with pytest.raises(BadZipFile):
+        _run_with_timeout(
+            lambda: unzipper.unzip(str(archive_path), path=tmp_path / "out")
+        )
+
+
+def test_unzip_rejects_undersized_declared_size(tmp_path, monkeypatch):
+    # Over-declared size (real output shorter than declared) is caught by the
+    # final exact-size check.
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "under.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("f.bin", b"y" * 1000)
+
+    infos = _infolist(archive_path)
+    infos[0].file_size += 500  # claim more than the stream really yields
+    monkeypatch.setattr(unzipper, "_read_infolist", lambda _zf: infos)
+
+    with pytest.raises(BadZipFile):
+        asyncio.run(unzipper.unzip(str(archive_path), path=tmp_path / "out"))
+
+
+def test_unzip_rejects_deflated_crc_mismatch(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "crc.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("a.txt", b"the original content")
+
+    infos = _infolist(archive_path)
+    infos[0].CRC ^= 0xFFFFFFFF  # corrupt the declared CRC
+    monkeypatch.setattr(unzipper, "_read_infolist", lambda _zf: infos)
+
+    with pytest.raises(BadZipFile):
+        asyncio.run(unzipper.unzip(str(archive_path), path=tmp_path / "out"))
+
+
+def test_unzip_rejects_stored_size_mismatch(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "stored.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("a.txt", b"hello stored world")
+
+    infos = _infolist(archive_path)
+    infos[0].file_size += 100  # disagree with compress_size
+    monkeypatch.setattr(unzipper, "_read_infolist", lambda _zf: infos)
+
+    with pytest.raises(BadZipFile):
+        asyncio.run(unzipper.unzip(str(archive_path), path=tmp_path / "out"))
+
+
+def test_unzip_rejects_stored_crc_mismatch(tmp_path, monkeypatch):
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "stored_crc.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("a.txt", b"stored payload")
+
+    infos = _infolist(archive_path)
+    infos[0].CRC ^= 0xFFFFFFFF
+    monkeypatch.setattr(unzipper, "_read_infolist", lambda _zf: infos)
+
+    with pytest.raises(BadZipFile):
+        asyncio.run(unzipper.unzip(str(archive_path), path=tmp_path / "out"))
+
+
+def test_unzip_accepts_honest_empty_deflated_entry(tmp_path, monkeypatch):
+    # Honest empty entries must still extract: compress_size > 0 so they take
+    # the guarded path with expected_size == 0.
+    _configure_async_reader(monkeypatch)
+    archive_path = tmp_path / "empty.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("empty.txt", b"")
+
+    target = tmp_path / "out"
+    asyncio.run(unzipper.unzip(str(archive_path), path=target))
+    assert (target / "empty.txt").read_bytes() == b""

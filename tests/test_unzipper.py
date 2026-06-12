@@ -723,8 +723,12 @@ def test_write_compressed_entry_fails_when_window_not_detected():
 
 
 def test_write_compressed_entry_detects_truncated_stream():
-    payload = zlib.compress(b"payload")
-    stream = _AsyncChunkStream([payload, b""])
+    # A genuinely truncated deflate stream never reaches its end-of-stream
+    # marker, so extraction must fail rather than silently keep the partial.
+    compressor = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    full = compressor.compress(b"payload" * 100) + compressor.flush()
+    truncated = full[: len(full) // 2]
+    stream = _AsyncChunkStream([truncated, b""])
     factory, errors = _zlib_backend_args()
     with pytest.raises(BadZipFile):
         unzipper._WINDOW_BITS_CACHE.clear()
@@ -732,8 +736,8 @@ def test_write_compressed_entry_detects_truncated_stream():
             unzipper._write_compressed_entry(
                 stream,
                 _AsyncRecorder(),
-                remaining=len(payload) + 5,
-                read_block=len(payload),
+                remaining=len(truncated),
+                read_block=len(truncated),
                 file_name="payload",
                 cache_key="test",
                 error_types=errors,

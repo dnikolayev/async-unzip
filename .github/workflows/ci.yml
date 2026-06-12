@@ -31,14 +31,18 @@ jobs:
       - name: Run tests (stdlib zlib backend)
         run: pytest -q
 
-      - name: Install optional accelerators
-        # Wheels are not always published for brand-new CPython; don't fail
-        # the run if they cannot be installed on the newest interpreter.
-        continue-on-error: true
-        run: pip install isal zlib-ng uvloop
+      - name: Install optional accelerators (best effort)
+        # Wheels are not always published for brand-new CPython. Install each
+        # accelerator independently so one missing wheel does not block the
+        # others; the suite adapts to whichever subset is importable.
+        run: |
+          for pkg in isal zlib-ng uvloop; do
+            pip install "$pkg" || echo "::warning::optional accelerator '$pkg' not installed for ${{ matrix.python-version }}"
+          done
 
       - name: Run tests (with accelerators when available)
-        continue-on-error: true
+        # Gating: whatever accelerators did install must pass. A real
+        # isal/zlib-ng/uvloop regression fails CI here instead of hiding.
         run: pytest -q
 
   lint:

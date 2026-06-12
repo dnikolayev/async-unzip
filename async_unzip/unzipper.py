@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import tempfile
+import warnings
 from pathlib import Path, PurePath
 from typing import AsyncIterable, Iterable, List, Optional
 from zipfile import (
@@ -713,9 +714,13 @@ async def unzip_stream(
     archive itself), raising :class:`LimitExceeded` before an oversized
     download is fully read.
 
-    Note: ``in_memory=True`` buffers the whole archive in RAM and decompresses
-    each entry synchronously via the stdlib ``zipfile`` reader, so ``backend``
-    and ``max_workers`` only apply to the default (spooled) path.
+    .. deprecated::
+        ``in_memory=True`` is deprecated and will be removed in a future
+        release. It buffers the whole archive in RAM, decompresses each entry
+        synchronously via the stdlib ``zipfile`` reader (blocking the event
+        loop), and ignores ``backend`` and ``max_workers``. Use the default
+        spooled path instead; point ``spool_dir`` at any writable location to
+        control where the temporary archive is stored.
     """
 
     if chunk_iterable is None or not hasattr(chunk_iterable, "__aiter__"):
@@ -828,6 +833,15 @@ async def unzip_stream(
         return written
 
     if in_memory:
+        warnings.warn(
+            "unzip_stream(in_memory=True) is deprecated and will be removed "
+            "in a future release: it buffers the whole archive in RAM, "
+            "decompresses synchronously, and ignores the backend/max_workers "
+            "options. Use the default spooled path (optionally with "
+            "spool_dir) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         buffer = await _iter_chunks_to_buffer()
         return await _extract_from_buffer(buffer)
 

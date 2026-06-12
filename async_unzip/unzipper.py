@@ -30,11 +30,38 @@ try:  # pragma: no cover - optional dependency
     import uvloop
 except ImportError:  # pragma: no cover
     uvloop = None
-else:  # pragma: no cover
+
+# Env var to opt out of the automatic uvloop policy (any non-empty value).
+NO_UVLOOP_ENV = "ASYNC_UNZIP_NO_UVLOOP"
+
+
+def _maybe_enable_uvloop():
+    """Install uvloop's event-loop policy unless opted out or already set.
+
+    Auto-enabling stays the default, but only when the host application has
+    not already installed an event-loop policy and has not set
+    ``ASYNC_UNZIP_NO_UVLOOP``. This avoids hijacking the process-wide policy
+    out from under a caller that imports this library.
+    """
+    if uvloop is None:
+        return
+    if os.environ.get(NO_UVLOOP_ENV):
+        return
+    # Read the private sentinel rather than asyncio.get_event_loop_policy():
+    # that getter instantiates the default policy as a side effect and is
+    # deprecated on 3.12+. A missing attribute just means "go ahead".
+    if getattr(asyncio.events, "_event_loop_policy", None) is not None:
+        return
     try:
-        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    except (RuntimeError, ValueError):  # safety net; fallback silently
+        with warnings.catch_warnings():
+            # set_event_loop_policy is deprecated on 3.12+; we still support it.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    except (RuntimeError, ValueError):  # pragma: no cover - safety net
         pass
+
+
+_maybe_enable_uvloop()
 
 DEFAULT_READ_BUFFER_SIZE = 64 * 1024
 

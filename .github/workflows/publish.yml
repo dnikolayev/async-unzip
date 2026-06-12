@@ -17,9 +17,9 @@ jobs:
     name: Build distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -38,7 +38,7 @@ jobs:
           echo "package=$pkg tag=$tag"
           test "$pkg" = "$tag"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -52,10 +52,11 @@ jobs:
       id-token: write  # required for Trusted Publishing (OIDC)
       contents: read   # for download-artifact within this run
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
 
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned to a commit SHA (v1.14.0) since this action holds id-token.
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b

@@ -9,7 +9,13 @@ import re
 import tempfile
 from pathlib import Path, PurePath
 from typing import AsyncIterable, Iterable, List, Optional
-from zipfile import ZIP_STORED, BadZipFile, ZipFile, is_zipfile
+from zipfile import (
+    ZIP_DEFLATED,
+    ZIP_STORED,
+    BadZipFile,
+    ZipFile,
+    is_zipfile,
+)
 from zlib import (
     MAX_WBITS,
     crc32 as _crc32,
@@ -51,6 +57,60 @@ _WINDOW_BITS_CACHE = {}
 _WINDOW_BITS_CACHE_MAX = 1024
 # Bit 0 of the general purpose flag marks an entry as encrypted.
 _ENCRYPTED_FLAG = 0x1
+# Compression methods this extractor can decode (stored copy + deflate).
+_SUPPORTED_COMPRESSION = frozenset({ZIP_STORED, ZIP_DEFLATED})
+
+
+class LimitExceeded(Exception):
+    """Raised when an archive exceeds a configured extraction limit.
+
+    This is a policy refusal, not archive corruption (which raises
+    :class:`zipfile.BadZipFile`), so callers can tell the two apart.
+    """
+
+    def __init__(self, limit, configured, observed, entry=None):
+        self.limit = limit
+        self.configured = configured
+        self.observed = observed
+        self.entry = entry
+        message = f"{limit} exceeded: {observed} > {configured}"
+        if entry is not None:
+            message += f" (entry {entry!r})"
+        super().__init__(message)
+
+
+def _enforce_limits(
+    entries,
+    max_entries=None,
+    max_entry_size=None,
+    max_total_uncompressed_size=None,
+):
+    """Reject an entry set that breaches the configured size/count limits.
+
+    Enforced from the central directory before any extraction. Because each
+    entry is integrity-checked to produce exactly its declared uncompressed
+    size, these declared totals bound what actually lands on disk.
+    """
+    if max_entries is not None and len(entries) > max_entries:
+        raise LimitExceeded("max_entries", max_entries, len(entries))
+
+    total = 0
+    for entry in entries:
+        size = entry.file_size
+        if max_entry_size is not None and size > max_entry_size:
+            raise LimitExceeded(
+                "max_entry_size", max_entry_size, size, entry.filename
+            )
+        total += size
+        if (
+            max_total_uncompressed_size is not None
+            and total > max_total_uncompressed_size
+        ):
+            raise LimitExceeded(
+                "max_total_uncompressed_size",
+                max_total_uncompressed_size,
+                total,
+            )
 
 
 def _safe_destination(root, file_name):
@@ -74,6 +134,11 @@ def _ensure_supported(in_file):
     if in_file.flag_bits & _ENCRYPTED_FLAG:
         raise NotImplementedError(
             f"Encrypted entries are not supported: {in_file.filename!r}"
+        )
+    if in_file.compress_type not in _SUPPORTED_COMPRESSION:
+        raise NotImplementedError(
+            f"Unsupported compression method {in_file.compress_type} "
+            f"for {in_file.filename!r} (only stored and deflate are supported)"
         )
 
 
@@ -516,10 +581,22 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
     max_workers=4,
     backend=None,
     __debug=None,
+    *,
+    max_entries=None,
+    max_entry_size=None,
+    max_total_uncompressed_size=None,
 ):
     """Extract entries from a ZIP archive using async I/O.
 
     Returns the list of paths written to disk (files and directory entries).
+
+    Optional resource limits (keyword-only, ``None`` means unlimited) are
+    checked against the central directory before extraction and raise
+    :class:`LimitExceeded` on breach:
+
+    - ``max_entries``: maximum number of selected members (files and dirs).
+    - ``max_entry_size``: maximum uncompressed size of any single entry.
+    - ``max_total_uncompressed_size``: maximum total uncompressed size.
     """
     user_buffer = buffer_size
     file_whitelist = set(files) if files else None
@@ -545,6 +622,13 @@ async def unzip(  # pylint: disable=too-many-locals,too-many-arguments
 
     if not selected_entries:
         return []
+
+    _enforce_limits(
+        selected_entries,
+        max_entries=max_entries,
+        max_entry_size=max_entry_size,
+        max_total_uncompressed_size=max_total_uncompressed_size,
+    )
 
     worker_count = max(1, int(max_workers) if max_workers else 1)
     created_dirs = set()
@@ -610,6 +694,11 @@ async def unzip_stream(
     spool_dir=None,
     in_memory: bool = False,
     __debug=None,
+    *,
+    max_entries=None,
+    max_entry_size=None,
+    max_total_uncompressed_size=None,
+    max_archive_size=None,
 ):
     """Extract a ZIP archive provided as an async stream of chunks.
 
@@ -617,6 +706,12 @@ async def unzip_stream(
     ``spool_dir``) and then processed via :func:`unzip`. Supply the same
     filtering arguments as :func:`unzip` to limit extracted entries. Returns
     the list of paths written to disk.
+
+    The ``max_entries``/``max_entry_size``/``max_total_uncompressed_size``
+    limits behave as in :func:`unzip`. ``max_archive_size`` additionally caps
+    the number of raw bytes consumed from the stream (the spooled/buffered
+    archive itself), raising :class:`LimitExceeded` before an oversized
+    download is fully read.
 
     Note: ``in_memory=True`` buffers the whole archive in RAM and decompresses
     each entry synchronously via the stdlib ``zipfile`` reader, so ``backend``
@@ -639,13 +734,22 @@ async def unzip_stream(
     )
     spool_parent.mkdir(parents=True, exist_ok=True)
 
+    def _check_archive_size(consumed):
+        if max_archive_size is not None and consumed > max_archive_size:
+            raise LimitExceeded(
+                "max_archive_size", max_archive_size, consumed
+            )
+
     async def _iter_chunks_to_buffer() -> io.BytesIO:
         buf = io.BytesIO()
+        consumed = 0
         async for chunk in chunk_iterable:
             if not isinstance(chunk, (bytes, bytearray, memoryview)):
                 raise TypeError("chunk_iterable must yield bytes-like objects")
             if not chunk:
                 continue
+            consumed += len(chunk)
+            _check_archive_size(consumed)
             buf.write(bytes(chunk))
         buf.seek(0)
         return buf
@@ -669,6 +773,13 @@ async def unzip_stream(
 
             if not selected_entries:
                 return written
+
+            _enforce_limits(
+                selected_entries,
+                max_entries=max_entries,
+                max_entry_size=max_entry_size,
+                max_total_uncompressed_size=max_total_uncompressed_size,
+            )
 
             created_dirs: set = set()
             for entry in selected_entries:
@@ -738,6 +849,7 @@ async def unzip_stream(
         atexit.register(cleanup_handle)
 
         try:
+            consumed = 0
             async with async_open(str(temp_path), "wb") as temp_file:
                 async for chunk in chunk_iterable:
                     if not isinstance(chunk, (bytes, bytearray, memoryview)):
@@ -746,6 +858,8 @@ async def unzip_stream(
                         )
                     if not chunk:
                         continue
+                    consumed += len(chunk)
+                    _check_archive_size(consumed)
                     await temp_file.write(bytes(chunk))
         finally:
             if cleanup_handle:
@@ -759,6 +873,9 @@ async def unzip_stream(
             buffer_size=buffer_size,
             max_workers=max_workers,
             backend=backend,
+            max_entries=max_entries,
+            max_entry_size=max_entry_size,
+            max_total_uncompressed_size=max_total_uncompressed_size,
             __debug=__debug,
         )
     finally:

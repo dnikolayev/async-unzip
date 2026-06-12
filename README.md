@@ -7,10 +7,14 @@ Fully tested on Python 3.9 through 3.14.
 
 Extraction is hardened against malicious archives: entry names that try to
 escape the destination directory ("Zip Slip", via `../` or absolute paths)
-are rejected, encrypted entries raise a clear error instead of writing
-garbage, and decompressed output is bounded against the entry's declared size
-to limit zip-bomb exposure. `unzip` and `unzip_stream` return the list of
-paths written to disk.
+are rejected, and encrypted entries raise a clear error instead of writing
+garbage. Each entry is integrity-checked while it streams — extraction aborts
+if a deflate stream is truncated, inflates past the uncompressed size declared
+in its header, or fails its CRC-32 — so corrupt or size-/CRC-spoofed entries
+are caught rather than written. (These are consistency checks against the
+archive's own metadata; they do not cap an entry whose header honestly
+declares a huge size. Configurable size/entry-count limits are planned.)
+`unzip` and `unzip_stream` return the list of paths written to disk.
 
 By default the extractor schedules up to 4 concurrent workers using the stdlib `zlib` backend. Tune concurrency via the `max_workers` argument, and install `python-isal` or `zlib-ng` if you want to force those accelerators via the optional `backend` parameter:
 
@@ -222,10 +226,18 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 
 ## Changelog
 
+### 0.6.1
+- Security: fix an infinite-loop denial of service in the deflate reader. A crafted archive declaring a `compress_size` larger than its real stream made decompression spin forever (and grow memory); the reader now stops at the deflate end-of-stream marker.
+- Fix a guard hole where an entry declaring `file_size == 0` disabled the inflate check, letting a deflated entry write unbounded bytes.
+- Add stdlib-parity integrity validation: every entry's CRC-32 is verified, the decompressed length must equal the declared size exactly, truncated streams are rejected, and stored entries must have matching declared sizes. `Z_SYNC_FLUSH`-terminated streams (which never set the deflate end-of-stream marker) are accepted when their size and CRC agree, matching `zipfile`.
+- Extract each entry atomically: stream into a temporary file and move it into place only after every integrity check passes, so a failed CRC/size check never leaves a corrupt or partial file at the destination.
+- Reword the "zip-bomb guard" description as the consistency check it actually is (see 0.6.0 note below).
+- CI: install optional accelerators best-effort per package, but gate the accelerator test run so real `isal`/`zlib-ng`/`uvloop` regressions fail the build.
+
 ### 0.6.0
 - Security: reject "Zip Slip" entries whose names escape the destination directory (relative `../` traversal and absolute paths).
 - Reject encrypted entries with a clear `NotImplementedError` instead of writing corrupt output.
-- Bound decompression output per block (caps peak memory on `zlib`/`zlib-ng`) and enforce the entry's declared uncompressed size as a backend-independent zip-bomb guard.
+- Bound decompression output per block (caps peak memory on `zlib`/`zlib-ng`) and abort extraction if an entry inflates beyond its declared uncompressed size — a backend-independent consistency check against corrupt or size-spoofed entries. (Not a full zip-bomb defense: an entry whose header honestly declares a huge size is still extracted; configurable size/entry-count limits are planned.)
 - `unzip` and `unzip_stream` now return the list of paths written to disk.
 - Offload central-directory parsing to a worker thread and make the streaming spool write asynchronously, so the event loop is no longer blocked on those I/O paths.
 - Bound the process-global window-bits cache so long-running services do not grow it without limit.

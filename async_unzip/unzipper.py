@@ -12,6 +12,7 @@ from typing import AsyncIterable, Iterable, List, Optional
 from zipfile import ZIP_STORED, BadZipFile, ZipFile, is_zipfile
 from zlib import (
     MAX_WBITS,
+    crc32 as _crc32,
     decompressobj as _zlib_decompressobj,
     error as ZLIB_error,
 )
@@ -236,15 +237,21 @@ async def _read_local_header(src, file_name, __debug=None):
             print(f"Done EXTRA seek: {extra_length} {extra_bytes}")
 
 
-async def _write_stored_entry(src, out, remaining, read_block, file_name):
-    """Stream an uncompressed entry out to disk."""
+async def _write_stored_entry(
+    src, out, remaining, read_block, file_name, expected_crc=None
+):
+    """Stream an uncompressed entry out to disk, verifying its CRC-32."""
+    running_crc = 0
     while remaining > 0:
         chunk_size = read_block if remaining > read_block else remaining
         buf = await src.read(chunk_size)
         if not buf:
             raise BadZipFile(f"Incomplete stored entry for {file_name}")
         await out.write(buf)
+        running_crc = _crc32(buf, running_crc)
         remaining -= len(buf)
+    if expected_crc is not None and running_crc != expected_crc:
+        raise BadZipFile(f"Bad CRC-32 for file {file_name!r}")
 
 
 async def _probe_window_bits(buf, error_types, factory, __debug=None):
@@ -304,19 +311,31 @@ async def _write_compressed_entry(
     error_types,
     factory,
     expected_size=None,
+    expected_crc=None,
     __debug=None,
 ):
     """Decompress a deflated entry while streaming to disk.
 
-    Output is flushed in ``read_block`` slices to cap peak memory (honoured
-    by the ``zlib`` and ``zlib-ng`` backends; ``python-isal`` ignores the
-    bound and returns each block in one piece). When the declared
-    uncompressed ``expected_size`` is known, the running total is checked so a
-    crafted or corrupt archive cannot inflate past it (a zip-bomb guard that
-    works across every backend).
+    Output is flushed in ``read_block`` slices to cap peak memory (the
+    ``zlib``/``zlib-ng`` backends honour the per-call bound; ``python-isal``
+    caps each returned chunk but releases buffered output via ``flush()``).
+
+    Integrity is validated like the stdlib reader: decompression stops as soon
+    as the deflate end-of-stream marker is reached (so a declared
+    ``compress_size`` larger than the real stream cannot spin forever), the
+    stream must actually reach that marker, the decompressed length must equal
+    the declared ``expected_size``, and the running CRC-32 must match
+    ``expected_crc``. These catch corrupt, truncated, or size-/CRC-spoofed
+    entries; they are a consistency check, not a substitute for explicit
+    resource limits.
     """
     if remaining == 0:
+        # No compressed payload: only consistent with an empty entry.
+        if expected_size:
+            raise BadZipFile(f"Truncated compressed entry for {file_name}")
         await out.write(b"")
+        if expected_crc:
+            raise BadZipFile(f"Bad CRC-32 for file {file_name!r}")
         return
 
     first_chunk_size = read_block if remaining > read_block else remaining
@@ -339,10 +358,14 @@ async def _write_compressed_entry(
         print(f"Incoming Length: {len(buf)}")
 
     produced = 0
+    running_crc = 0
 
     async def _drain(data):
-        nonlocal produced
-        while data:
+        nonlocal produced, running_crc
+        # Stop once the deflate stream ends; any trailing input is surplus
+        # from a lying compress_size and must not be fed back in (that spins
+        # forever on unconsumed_tail).
+        while data and not decomp.eof:
             chunk = decomp.decompress(data, read_block)
             if chunk:
                 produced += len(chunk)
@@ -351,12 +374,13 @@ async def _write_compressed_entry(
                         "Decompressed size exceeds declared size for "
                         f"{file_name}"
                     )
+                running_crc = _crc32(chunk, running_crc)
                 await out.write(chunk)
             data = decomp.unconsumed_tail
 
     while buf:
         await _drain(buf)
-        if remaining <= 0:
+        if decomp.eof or remaining <= 0:
             break
         chunk_size = read_block if remaining > read_block else remaining
         buf = await src.read(chunk_size)
@@ -375,7 +399,20 @@ async def _write_compressed_entry(
             raise BadZipFile(
                 f"Decompressed size exceeds declared size for {file_name}"
             )
+        running_crc = _crc32(tail, running_crc)
         await out.write(tail)
+
+    # Size and CRC are the authoritative integrity gates.
+    if expected_size is not None and produced != expected_size:
+        raise BadZipFile(f"Decompressed size mismatch for {file_name}")
+    if expected_crc is not None and running_crc != expected_crc:
+        raise BadZipFile(f"Bad CRC-32 for file {file_name!r}")
+    # A missing deflate end-of-stream marker only signals truncation when the
+    # size/CRC evidence cannot vouch for the output. Streams flushed with
+    # Z_SYNC_FLUSH decode fully yet never set eof; stdlib accepts them as long
+    # as the declared size and CRC check out, so we do too.
+    if not decomp.eof and (expected_size is None or expected_crc is None):
+        raise BadZipFile(f"Truncated compressed entry for {file_name}")
 
 
 async def _extract_entry(  # pylint: disable=too-many-arguments
@@ -401,45 +438,72 @@ async def _extract_entry(  # pylint: disable=too-many-arguments
 
     _ensure_supported(in_file)
 
-    parent_key = str(unpack_filename_path.parent)
+    # A stored entry is copied verbatim, so its declared sizes must agree;
+    # a mismatch means a corrupt central directory. Checked before any file
+    # is created so a bad entry leaves nothing behind.
+    if (
+        in_file.compress_type == ZIP_STORED
+        and in_file.file_size != in_file.compress_size
+    ):
+        raise BadZipFile(f"Stored entry size mismatch for {file_name}")
+
+    parent = unpack_filename_path.parent
+    parent_key = str(parent)
     if parent_key not in created_dirs:
-        unpack_filename_path.parent.mkdir(parents=True, exist_ok=True)
+        parent.mkdir(parents=True, exist_ok=True)
         created_dirs.add(parent_key)
 
-    async with async_open(zip_path, mode="rb") as src:
-        if async_reader == "aiofile":
-            src.seek(in_file.header_offset)
-        else:
-            await src.seek(in_file.header_offset)
-        if __debug:
-            print(f"Done HEADER_OFFSET seek: {in_file.header_offset}")
-
-        await _read_local_header(src, file_name, __debug=__debug)
-
-        async with async_open(str(unpack_filename_path), "wb+") as out:
-            remaining = in_file.compress_size
-            read_block = _select_buffer_size(in_file.file_size, user_buffer)
-            if in_file.compress_type == ZIP_STORED:
-                await _write_stored_entry(
-                    src,
-                    out,
-                    remaining,
-                    read_block,
-                    file_name,
-                )
+    # Extract atomically: stream into a temporary file in the same directory
+    # and move it into place only after every integrity check passes, so a
+    # failed CRC/size check never leaves a corrupt file at the destination.
+    handle, tmp_name = tempfile.mkstemp(
+        prefix=f"{unpack_filename_path.name}.", suffix=".part", dir=str(parent)
+    )
+    os.close(handle)
+    tmp_path = Path(tmp_name)
+    try:
+        async with async_open(zip_path, mode="rb") as src:
+            if async_reader == "aiofile":
+                src.seek(in_file.header_offset)
             else:
-                await _write_compressed_entry(
-                    src,
-                    out,
-                    remaining,
-                    read_block,
-                    file_name,
-                    cache_key=cache_key,
-                    error_types=error_types,
-                    factory=factory,
-                    expected_size=in_file.file_size or None,
-                    __debug=__debug,
+                await src.seek(in_file.header_offset)
+            if __debug:
+                print(f"Done HEADER_OFFSET seek: {in_file.header_offset}")
+
+            await _read_local_header(src, file_name, __debug=__debug)
+
+            async with async_open(str(tmp_path), "wb+") as out:
+                remaining = in_file.compress_size
+                read_block = _select_buffer_size(
+                    in_file.file_size, user_buffer
                 )
+                if in_file.compress_type == ZIP_STORED:
+                    await _write_stored_entry(
+                        src,
+                        out,
+                        remaining,
+                        read_block,
+                        file_name,
+                        expected_crc=in_file.CRC,
+                    )
+                else:
+                    await _write_compressed_entry(
+                        src,
+                        out,
+                        remaining,
+                        read_block,
+                        file_name,
+                        cache_key=cache_key,
+                        error_types=error_types,
+                        factory=factory,
+                        expected_size=in_file.file_size,
+                        expected_crc=in_file.CRC,
+                        __debug=__debug,
+                    )
+        os.replace(tmp_path, unpack_filename_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return unpack_filename_path
 
 
@@ -627,16 +691,28 @@ async def unzip_stream(
                     created_dirs.add(parent_key)
 
                 read_block = _select_buffer_size(entry.file_size, buffer_size)
-                with archive.open(entry) as src:
-                    async with async_open(
-                        str(unpack_filename_path),
-                        "wb+",
-                    ) as out:
-                        while True:
-                            chunk = src.read(read_block)
-                            if not chunk:
-                                break
-                            await out.write(chunk)
+                # The stdlib reader verifies the CRC as it goes; extract into a
+                # temp file and move it into place only on success so a corrupt
+                # entry never leaves a partial file at the destination.
+                handle, tmp_name = tempfile.mkstemp(
+                    prefix=f"{unpack_filename_path.name}.",
+                    suffix=".part",
+                    dir=str(unpack_filename_path.parent),
+                )
+                os.close(handle)
+                tmp_path = Path(tmp_name)
+                try:
+                    with archive.open(entry) as src:
+                        async with async_open(str(tmp_path), "wb+") as out:
+                            while True:
+                                chunk = src.read(read_block)
+                                if not chunk:
+                                    break
+                                await out.write(chunk)
+                    os.replace(tmp_path, unpack_filename_path)
+                except BaseException:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
                 written.append(unpack_filename_path)
         return written
 

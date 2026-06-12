@@ -33,9 +33,7 @@ class _AsyncOpen:
         self._fp = None
 
     async def __aenter__(self):
-        self._fp = open(  # pylint: disable=consider-using-with
-            self._path, self._mode
-        )
+        self._fp = open(self._path, self._mode)  # pylint: disable=consider-using-with
         return _AsyncFile(self._fp)
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -85,9 +83,7 @@ def test_unzip_max_entries(tmp_path, async_reader):
         [("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")],
     )
     with pytest.raises(LimitExceeded) as info:
-        asyncio.run(
-            unzipper.unzip(str(archive), path=tmp_path / "out", max_entries=2)
-        )
+        asyncio.run(unzipper.unzip(str(archive), path=tmp_path / "out", max_entries=2))
     assert info.value.limit == "max_entries"
     # Fail-fast: nothing extracted.
     assert not (tmp_path / "out").exists()
@@ -100,9 +96,7 @@ def test_unzip_max_entry_size(tmp_path, async_reader):
     )
     with pytest.raises(LimitExceeded) as info:
         asyncio.run(
-            unzipper.unzip(
-                str(archive), path=tmp_path / "out", max_entry_size=1000
-            )
+            unzipper.unzip(str(archive), path=tmp_path / "out", max_entry_size=1000)
         )
     assert info.value.limit == "max_entry_size"
     assert info.value.entry == "big.txt"
@@ -194,7 +188,7 @@ def _chunks_of(path, step=4096):
     async def _gen():
         data = Path(path).read_bytes()
         for idx in range(0, len(data), step):
-            yield data[idx: idx + step]
+            yield data[idx : idx + step]
 
     return _gen()
 

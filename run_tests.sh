@@ -9,8 +9,8 @@ if [ -d "${ROOT_DIR}/venv" ]; then
   source "${ROOT_DIR}/venv/bin/activate"
 fi
 
-echo "Running isort..."
-isort async_unzip tests
+echo "Running isort check..."
+isort --check-only async_unzip tests
 
 echo "Running flake8..."
 flake8 async_unzip tests

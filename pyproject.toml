@@ -30,7 +30,16 @@ classifiers = [
 Homepage = "https://github.com/ueni-ltd/async-unzip"
 
 [project.optional-dependencies]
-dev = ["tox", "pytest", "pytest-cov", "flake8", "isort", "pylint", "mypy"]
+dev = [
+    "tox",
+    "pytest",
+    "pytest-cov",
+    "black",
+    "flake8",
+    "isort",
+    "pylint",
+    "mypy",
+]
 isal = ["isal"]
 zlib-ng = ["zlib-ng"]
 speedups = ["isal", "zlib-ng", "uvloop"]
@@ -66,3 +75,25 @@ filterwarnings = [
 python_version = "3.9"
 ignore_missing_imports = true
 warn_unused_ignores = false
+
+[tool.pylint."messages control"]
+disable = [
+    "broad-exception-caught",
+    "duplicate-code",
+    "redefined-outer-name",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-branches",
+    "too-many-function-args",
+    "too-many-locals",
+    "too-many-positional-arguments",
+    "unspecified-encoding",
+    "unused-argument",
+    "unused-import",
+    "use-implicit-booleaness-not-comparison",
+]
+
+[tool.pylint.design]
+max-args = 10
+max-locals = 25
+max-positional-arguments = 10

@@ -249,6 +249,10 @@ asyncio.run(unzip('tests/test_files/fixture_beta.zip', path='some_dir'))
 
 ## Changelog
 
+### 0.8.1
+- Correct the PyPI project link to the canonical repository.
+- Keep release artifacts limited to package sources and metadata.
+
 ### 0.8.0
 - uvloop is no longer enabled as an unconditional import-time side effect. It still auto-installs its event-loop policy by default, but only when the host application hasn't already set a policy and hasn't set the `ASYNC_UNZIP_NO_UVLOOP` environment variable.
 - Debug output now goes through the `logging` module (`async_unzip.unzipper` logger at DEBUG level) instead of `print()`. The `__debug` parameter is renamed `debug`; `__debug` remains a deprecated keyword-only alias that emits a `DeprecationWarning`.

@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ueni-ltd/async-unzip"
+Homepage = "https://github.com/dnikolayev/async-unzip"
 
 [project.optional-dependencies]
 dev = [
@@ -46,6 +46,7 @@ speedups = ["isal", "zlib-ng", "uvloop"]
 
 [tool.setuptools]
 zip-safe = false
+py-modules = []
 
 [tool.setuptools.dynamic]
 # __version__ must stay a plain string literal at the top of __init__.py,
@@ -53,6 +54,7 @@ zip-safe = false
 version = { attr = "async_unzip.__version__" }
 
 [tool.setuptools.packages.find]
+include = ["async_unzip*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]

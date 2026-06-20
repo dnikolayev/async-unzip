@@ -1,3 +1,12 @@
 include README.md
 include LICENSE
 prune tests
+prune venv
+prune venv-*
+prune .tox
+prune .mypy_cache
+prune .pytest_cache
+prune build
+prune dist
+global-exclude *.py[cod]
+global-exclude .DS_Store

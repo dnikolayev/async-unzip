@@ -18,6 +18,7 @@ def test_artifacts_expire_after_consumers_finish():
     assert "workflow_run.conclusion == 'success'" in cleanup
     assert "/actions/runs/${RUN_ID}/artifacts?per_page=100" in cleanup
     assert "group: actions-artifact-cleanup" in cleanup
+    assert "queue: max" in cleanup
     assert "github.run_id" not in cleanup
     assert cleanup.count('ids_file="$(mktemp)"') == 2
     assert cleanup.count("trap 'rm -f \"${ids_file}\"' EXIT") == 2

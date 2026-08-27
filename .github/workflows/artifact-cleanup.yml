@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: actions-artifact-cleanup-${{ github.event.workflow_run.id || github.run_id }}
+  group: actions-artifact-cleanup
   cancel-in-progress: false
 
 defaults:
